@@ -1,0 +1,21 @@
+[package]
+name = "flowwisper-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "flowwisper_desktop"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "flowwisper-desktop"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["macos-private-api"] }
+thiserror = "1"
+
+[build-dependencies]
+tauri-build = { version = "2" }

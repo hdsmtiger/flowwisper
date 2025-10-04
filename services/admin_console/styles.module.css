@@ -1,0 +1,26 @@
+.main {
+  min-height: 100vh;
+  padding: 4rem 6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 3rem;
+  background: radial-gradient(circle at top, rgba(59, 130, 246, 0.25), rgba(15, 23, 42, 0.95));
+}
+
+.hero h1 {
+  font-size: 3rem;
+  margin-bottom: 0.5rem;
+}
+
+.panel {
+  background: rgba(15, 23, 42, 0.85);
+  border-radius: 1.5rem;
+  padding: 2rem;
+  box-shadow: 0 20px 40px rgba(2, 6, 23, 0.6);
+}
+
+.panel ol {
+  margin: 0;
+  padding-left: 1.5rem;
+  line-height: 1.8;
+}
