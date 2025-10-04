@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Flowwisper Fn",
+  "version": "0.1.0",
+  "identifier": "com.flowwisper.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Flowwisper Fn",
+        "width": 900,
+        "height": 620,
+        "decorations": true,
+        "visible": true
+      }
+    ]
+  }
+}
