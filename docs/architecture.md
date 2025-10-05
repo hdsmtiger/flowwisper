@@ -103,7 +103,7 @@ graph TD
   6. **Context Collector**：聚合当前前景应用、语言设置、剪贴板摘要、用户偏好，向片段引擎与 LLM 提供安全过滤后的上下文；对敏感应用（银行、密码管理器）启用黑名单保护。
   7. **Persistence Layer**：通过 `SQLCipher` 加密 SQLite 存储历史、词典、片段库；启用 FTS5 全文索引与分区表满足 500+ 条记录搜索；本地语音缓存采用加密文件夹并定期清理。
   8. **Sync Agent**：与云端同步服务进行差量同步，支持离线队列、冲突解决与租户策略下载。
-  9. **Session State Manager**：维护录音状态机（Idle → PreRoll → Recording → Processing → Publishing → Completed/Failed），监听音频管线、引擎编排与同步事件，通过内存消息总线（Tokio broadcast channel）向 Tauri 前端推送状态；触发提示音、托盘动画与无障碍文本播报，确保长按 Fn 后 150ms 内给出“准备中”反馈，并在处理/重试阶段持续提示用户工具正在工作。
+  9. **Session State Manager**：维护录音状态机（Idle → PreRoll → Recording → Processing → Publishing → Completed/Failed），监听音频管线、引擎编排与同步事件，通过内存消息总线（Tokio broadcast channel）向 Tauri 前端推送状态；触发提示音、托盘动画与无障碍文本播报，确保长按 Fn 后 400ms 内给出“准备中”反馈，并在处理/重试阶段持续提示用户工具正在工作。
 
 ### 5.3 语音与 AI 引擎
 - **本地识别**：`whisper.cpp`（ggml/GGUF 模型，支持多语言），集成 GPU 加速（Metal / DirectML）。提供量化模型（int4/int8）以减小内存。
@@ -160,7 +160,7 @@ sequenceDiagram
 ```
 
 #### 6.1.1 会话状态机与状态反馈
-- **状态划分**：`Idle`（等待热键）→ `PreRoll`（Fn 长按 150ms 内展示“准备中”动画、播放提示音）→ `Recording`（实时波形、剩余时长倒计时、云端/本地引擎指示）→ `Processing`（停止采集后展示转写/润色进度、云端同步百分比）→ `Publishing`（插入/复制/同步动作进行中）→ `Completed`/`Failed`（成功提示或可操作错误信息）。
+- **状态划分**：`Idle`（等待热键）→ `PreRoll`（Fn 长按 400ms 内展示“准备中”动画、播放提示音）→ `Recording`（实时波形、剩余时长倒计时、云端/本地引擎指示）→ `Processing`（停止采集后展示转写/润色进度、云端同步百分比）→ `Publishing`（插入/复制/同步动作进行中）→ `Completed`/`Failed`（成功提示或可操作错误信息）。
 - **声波可视化反馈**：在 `Idle` → `PreRoll` 过渡时加载淡入的“预热”波形，`Recording` 阶段根据包络线强度调整振幅与颜色（例如绿色=拾音良好、黄色=音量偏低、红色=噪音/爆音），`Processing` 阶段转为轻微呼吸灯，提示仍在处理。
 - **事件触发**：Session State Manager 监听热键、音频帧、ASR/LLM 回调、同步结果，并在状态切换时推送到 UI；若 300ms 内未收到 ASR 反馈则保持“处理中”并展示旋转进度。
 - **用户反馈通道**：UI 浮层动画 + 托盘图标点亮/闪烁 + 可选语音播报；辅助功能模式下提供字幕条与高对比度颜色。长会话超过 4 分钟或接近 5 分钟上限时，HUD 弹出提醒并允许用户延长或分段保存。
