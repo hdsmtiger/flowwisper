@@ -5,7 +5,8 @@
   "description": "Flowwisper Fn 桌面端 Tauri + React 壳层",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run test:backend && vite build",
+    "test:backend": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
     "preview": "vite preview"
   },
   "dependencies": {
