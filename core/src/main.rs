@@ -12,6 +12,6 @@ use telemetry::init_tracing;
 async fn main() -> Result<()> {
     init_tracing();
 
-    let manager = SessionManager::new();
+    let manager = SessionManager::new()?;
     manager.run().await
 }
