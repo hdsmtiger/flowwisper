@@ -1,6 +1,6 @@
 # Flowwisper Monorepo
 
-本仓库包含 Flowwisper Fn 语音输入助手的多模块脚手架，覆盖桌面端、核心服务以及云端组件，便于按照《PRD》和《架构设计》推进后续开发。
+本仓库包含 Flowwisper Fn 语音输入助手的多模块脚手架，覆盖桌面端、核心服务以及云端组件，便于按照《PRD》和《架构设计》推进后续开发。贡献流程与协作规范请参阅 [Repository Guidelines](AGENTS.md)。
 
 ## 目录结构
 
