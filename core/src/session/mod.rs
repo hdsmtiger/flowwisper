@@ -191,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_audio_frames_and_broadcasts_updates() {
-        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok("local".to_string())]));
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok("local.".to_string())]));
         let orchestrator = EngineOrchestrator::with_engine(
             EngineConfig {
                 prefer_cloud: false,
@@ -202,8 +202,9 @@ mod tests {
         manager.run().await.expect("bootstrap should succeed");
 
         let mut broadcast_rx = manager.subscribe_updates();
-        let (handle, mut client_rx) =
-            manager.start_realtime_transcription(RealtimeSessionConfig::default());
+        let mut config = RealtimeSessionConfig::default();
+        config.enable_polisher = false;
+        let (handle, mut client_rx) = manager.start_realtime_transcription(config);
 
         // Keep the handle alive for the duration of the test.
         let _guard = handle;
@@ -227,6 +228,7 @@ mod tests {
         assert_eq!(update.frame_index, 1);
         assert_eq!(transcript.source, TranscriptSource::Local);
         assert!(transcript.is_primary);
+        assert_eq!(transcript.text, "local.");
 
         let broadcast_update = timeout(Duration::from_millis(600), broadcast_rx.recv())
             .await
@@ -243,10 +245,10 @@ mod tests {
     #[tokio::test]
     async fn delivers_warn_notice_to_slow_clients() {
         let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![
-            Ok("local-fast".to_string()),
+            Ok("local-fast.".to_string()),
             Err(anyhow!("local failure")),
         ]));
-        let cloud_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok("cloud".to_string())]));
+        let cloud_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok("cloud.".to_string())]));
         let orchestrator = EngineOrchestrator::with_engines(
             EngineConfig {
                 prefer_cloud: false,
@@ -260,6 +262,7 @@ mod tests {
         let mut broadcast_rx = manager.subscribe_updates();
         let mut config = RealtimeSessionConfig::default();
         config.buffer_capacity = 1;
+        config.enable_polisher = false;
         let (handle, mut client_rx) = manager.start_realtime_transcription(config);
         let _guard = handle;
 
@@ -281,7 +284,7 @@ mod tests {
             .expect("client channel closed");
         match &first_update.payload {
             UpdatePayload::Transcript(payload) => {
-                assert_eq!(payload.text, "local-fast");
+                assert_eq!(payload.text, "local-fast.");
                 assert_eq!(payload.source, TranscriptSource::Local);
             }
             _ => panic!("expected first transcript"),

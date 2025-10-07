@@ -25,7 +25,7 @@ use hotkey::{
     load_hotkey_config, load_or_create_hmac_key, AppState, FnProbeResult, HotkeyBinding,
     HotkeyCompatibilityLayer, HotkeySource, TutorialStatus,
 };
-use session::SessionStatus;
+use session::{SessionStatus, TranscriptSentenceSelection, TranscriptStreamEvent};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HotkeyValidationResult {
@@ -99,6 +99,11 @@ struct AudioDiagnostics {
     waveform: Vec<f32>,
     sample_token: String,
     frame_window_ms: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TranscriptSelectionRequest {
+    selections: Vec<TranscriptSentenceSelection>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +192,22 @@ fn session_status(state: State<AppState>) -> Result<SessionStatus, String> {
 #[tauri::command]
 fn session_timeline(state: State<AppState>) -> Result<Vec<SessionStatus>, String> {
     state.session.timeline()
+}
+
+#[tauri::command]
+fn session_transcript_log(state: State<AppState>) -> Result<Vec<TranscriptStreamEvent>, String> {
+    state.session.transcript_log()
+}
+
+#[tauri::command]
+fn session_transcript_apply_selection(
+    app: AppHandle,
+    state: State<AppState>,
+    request: TranscriptSelectionRequest,
+) -> Result<(), String> {
+    state
+        .session
+        .apply_transcript_selection(&app, request.selections)
 }
 
 #[tauri::command]
@@ -1014,6 +1035,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             session_status,
             session_timeline,
+            session_transcript_log,
+            session_transcript_apply_selection,
             prime_session_preroll,
             mark_session_processing,
             complete_session_bootstrap,

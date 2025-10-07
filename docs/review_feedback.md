@@ -33,3 +33,11 @@
 - **构建性能**：默认 Next.js 配置未启用 `swcMinify`、`experimental.appDir` 等选项，后续根据需求优化打包体积。
 
 > 以上建议可结合即将引入的自动化构建脚本及 CI 流程逐步落地。
+
+## 2024-UC2.2 双视图落地审查
+- **句级回退命令缺失（阻断核心交互）**：前端钩子 `useDualViewTranscript` 通过 `session_transcript_apply_selection` Tauri 命令下发句级回退请求，但桌面端 `invoke_handler` 未暴露该命令，因此所有回退操作都会失败。这直接违背 UC2.2 “允许句级切换/恢复原始稿”的验收要求，需要在 `src-tauri` 层补齐对应命令及管线对接。
+  - ✅ 桌面端现已注册 `session_transcript_apply_selection` 命令，并通过 `SessionStateManager::apply_transcript_selection` 立即回放确认事件，满足句级回退闭环。
+- **润色稿仍为原文回显**：核心编排默认注入的是 `IdentitySentencePolisher`，仅对字符串做 `trim` 后原样返回，导致润色视图与原始视图内容一致，无法满足 PRD 中“右侧 2.5s 内呈现 AI 润色稿”的硬性要求。需接入真实的润色引擎或至少引入可配置实现。
+  - ✅ 默认多视图已切换为 `LightweightSentencePolisher`，支持填充去噪、口语化语法修正与自动补标点，确保润色列与原始列差异化呈现。
+- **原始稿增量刷新超过 200ms**：`RealtimeSessionConfig` 把 `raw_emit_window` 设定为 400ms，上游即便以 100-200ms 帧率推送，只要没有句号边界就会延迟到 400ms 才落地文本，不符合 PRD 对“每 200ms 推送增量字符”的要求。建议将窗口收紧至 ≤200ms，并在句缓冲策略上对齐需求文档。
+  - ✅ `RealtimeSessionConfig` 默认 `raw_emit_window` 已收紧到 200ms，配合句缓冲在无标点场景下也会按 200ms 窗口强制刷新原始稿。
