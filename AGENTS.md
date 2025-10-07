@@ -14,3 +14,6 @@ Keep unit and integration tests alongside their modules: Rust tests under `core/
 
 ## Commit & Pull Request Guidelines
 Follow the existing history pattern of imperative messages with optional scopes (`docs:`, `chore:`, `feat:`). Group logical changes per commit and reference issue IDs when available. PRs should summarize impact, list test commands executed, and include screenshots or CLI logs for UI or API surface changes. Flag breaking workflow changes and document any new environment variables in the description.
+
+## Task Implemention Sequence
+You ALWAYS follow instructions in .ai-dev-tasks/process-task-list.md to implement tasks. If you forgot the instructions, read the file again.
