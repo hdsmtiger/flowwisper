@@ -954,35 +954,48 @@ fn request_microphone_permission_macos() -> Result<PermissionCheck, String> {
     use objc::{class, msg_send, sel, sel_impl};
     use std::sync::mpsc;
     use std::time::Duration as StdDuration;
+    use tauri::async_runtime::block_on;
 
-    unsafe {
-        let session: *mut Object = msg_send![class!(AVAudioSession), sharedInstance];
-        if session.is_null() {
-            return Err("无法获取 AVAudioSession".into());
-        }
-        let (sender, receiver) = mpsc::channel();
-        let block = ConcreteBlock::new(move |granted: bool| {
-            let _ = sender.send(granted);
-        });
-        let block = block.copy();
-        let _: () = msg_send![session, requestRecordPermission:&block];
+    // 在主线程上执行 UI 相关的操作以避免崩溃
+    block_on(async move {
+        unsafe {
+            let session: *mut Object = msg_send![class!(AVAudioSession), sharedInstance];
+            if session.is_null() {
+                return Err("无法获取 AVAudioSession".into());
+            }
+            
+            let (sender, receiver) = mpsc::channel();
+            let block = ConcreteBlock::new(move |granted: bool| {
+                let _ = sender.send(granted);
+            });
+            let block = block.copy();
+            
+            // 添加异常处理以防止崩溃
+            let result: Result<(), String> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _: () = msg_send![session, requestRecordPermission:&block];
+            })).map_err(|_| "调用系统权限API时发生异常".to_string());
+            
+            if let Err(err) = result {
+                return Err(err);
+            }
 
-        match receiver.recv_timeout(StdDuration::from_secs(5)) {
-            Ok(true) => Ok(PermissionCheck {
-                granted: true,
-                manual_hint: None,
-                detail: Some("已通过 AVAudioSession 请求麦克风权限".into()),
-            }),
-            Ok(false) => Ok(PermissionCheck {
-                granted: false,
-                manual_hint: Some(
-                    "请前往 系统设置 → 隐私与安全 → 麦克风，手动启用 Flowwisper。".into(),
-                ),
-                detail: Some("用户拒绝了麦克风权限".into()),
-            }),
-            Err(_) => Err("未能在 5 秒内获取麦克风权限结果".into()),
+            match receiver.recv_timeout(StdDuration::from_secs(5)) {
+                Ok(true) => Ok(PermissionCheck {
+                    granted: true,
+                    manual_hint: None,
+                    detail: Some("已通过 AVAudioSession 请求麦克风权限".into()),
+                }),
+                Ok(false) => Ok(PermissionCheck {
+                    granted: false,
+                    manual_hint: Some(
+                        "请前往 系统设置 → 隐私与安全 → 麦克风，手动启用 Flowwisper。".into(),
+                    ),
+                    detail: Some("用户拒绝了麦克风权限".into()),
+                }),
+                Err(_) => Err("未能在 5 秒内获取麦克风权限结果".into()),
+            }
         }
-    }
+    })
 }
 
 #[cfg(target_os = "windows")]

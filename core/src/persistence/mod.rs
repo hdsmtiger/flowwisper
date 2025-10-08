@@ -701,7 +701,7 @@ mod legacy_tests {
             .list_notices(50)
             .await
             .expect("notice history should be returned");
-        assert_eq!(history.len(), 50);:
+        assert_eq!(history.len(), 50);
         assert_eq!(history.first().unwrap().notice_id, "notice-195");
         assert_eq!(
             history.last().unwrap().notice_id,

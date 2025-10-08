@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Flowwisper Fn",
+  "productName": "Flow Whisper",
   "version": "0.1.0",
   "identifier": "com.flowwisper.desktop",
   "build": {
@@ -11,12 +11,35 @@
     "windows": [
       {
         "label": "main",
-        "title": "Flowwisper Fn",
+        "title": "Flow Whisper",
         "width": 900,
         "height": 620,
         "decorations": true,
         "visible": true
       }
     ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.icns"],
+    "macOS": {
+      "minimumSystemVersion": "10.13",
+      "entitlements": "Entitlements.plist",
+      "dmg": {
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    }
   }
 }
