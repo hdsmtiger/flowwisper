@@ -31,7 +31,20 @@ mod platform {
         kCFRunLoopDefaultMode, CFRunLoopGetCurrent, CFRunLoopRef, CFRunLoopRunInMode, CFRunLoopStop,
     };
     use core_foundation::string::{CFString, CFStringRef};
-    use io_kit_sys::hid::*;
+    use io_kit_sys::hid::base::{IOHIDDeviceRef, IOHIDValueRef};
+    use io_kit_sys::hid::device::IOHIDDeviceGetProperty;
+    use io_kit_sys::hid::element::{
+        IOHIDElementGetDevice, IOHIDElementGetUsage, IOHIDElementGetUsagePage,
+    };
+    use io_kit_sys::hid::keys::kIOHIDOptionsTypeNone;
+    use io_kit_sys::hid::manager::{
+        IOHIDManagerClose, IOHIDManagerCreate, IOHIDManagerOpen,
+        IOHIDManagerRegisterInputValueCallback, IOHIDManagerScheduleWithRunLoop,
+        IOHIDManagerSetDeviceMatchingMultiple, IOHIDManagerUnscheduleFromRunLoop,
+    };
+    use io_kit_sys::hid::usage_tables::kHIDPage_KeyboardOrKeypad;
+    use io_kit_sys::hid::value::{IOHIDValueGetElement, IOHIDValueGetTimeStamp};
+    use io_kit_sys::ret::kIOReturnSuccess;
     use mach::mach_time::{mach_absolute_time, mach_timebase_info, mach_timebase_info_data_t};
     use std::ffi::c_void;
     use std::sync::mpsc;
@@ -127,11 +140,11 @@ mod platform {
 
     unsafe fn extract_origin(device: IOHIDDeviceRef) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
-        let transport_key = CFString::wrap_under_get_rule(kIOHIDTransportKey);
+        let transport_key = CFString::from_static_string("Transport");
         if let Some(value) = copy_string_property(device, transport_key.as_concrete_TypeRef()) {
             parts.push(value);
         }
-        let product_key = CFString::wrap_under_get_rule(kIOHIDProductKey);
+        let product_key = CFString::from_static_string("Product");
         if let Some(value) = copy_string_property(device, product_key.as_concrete_TypeRef()) {
             parts.push(value);
         }
@@ -142,7 +155,7 @@ mod platform {
         }
     }
 
-    unsafe fn copy_string_property(device: IOHIDDeviceRef, key: CFTypeRef) -> Option<String> {
+    unsafe fn copy_string_property(device: IOHIDDeviceRef, key: CFStringRef) -> Option<String> {
         let value = IOHIDDeviceGetProperty(device, key);
         if value.is_null() {
             return None;
@@ -175,14 +188,12 @@ mod platform {
         }
     }
 
-    fn matching_dictionary(usage_page: u32, usage: u32) -> CFDictionary {
-        let mut dict = CFMutableDictionary::new();
-        unsafe {
-            let page_key = CFString::wrap_under_get_rule(kIOHIDDeviceUsagePageKey);
-            let usage_key = CFString::wrap_under_get_rule(kIOHIDDeviceUsageKey);
-            dict.set(&page_key, &CFNumber::from(usage_page as i32));
-            dict.set(&usage_key, &CFNumber::from(usage as i32));
-        }
+    fn matching_dictionary(usage_page: u32, usage: u32) -> CFDictionary<CFString, CFNumber> {
+        let mut dict: CFMutableDictionary<CFString, CFNumber> = CFMutableDictionary::new();
+        let page_key = CFString::from_static_string("DeviceUsagePage");
+        let usage_key = CFString::from_static_string("DeviceUsage");
+        dict.set(page_key, CFNumber::from(usage_page as i32));
+        dict.set(usage_key, CFNumber::from(usage as i32));
         dict.to_immutable()
     }
 
@@ -223,13 +234,8 @@ mod platform {
                 return;
             }
 
-            IOHIDManagerRegisterInputValueCallback(
-                manager,
-                Some(input_callback),
-                ctx_ptr as *mut c_void,
-            );
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), false);
-            IOHIDManagerRegisterInputValueCallback(manager, None, std::ptr::null_mut());
+            IOHIDManagerRegisterInputValueCallback(manager, input_callback, ctx_ptr as *mut c_void);
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, timeout.as_secs_f64(), 0u8);
             IOHIDManagerUnscheduleFromRunLoop(manager, run_loop, kCFRunLoopDefaultMode);
             IOHIDManagerClose(manager, kIOHIDOptionsTypeNone);
             CFRelease(manager as CFTypeRef);

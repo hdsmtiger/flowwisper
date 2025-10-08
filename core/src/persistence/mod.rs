@@ -555,12 +555,12 @@ impl PersistenceActor {
         let effective_limit = limit.min(self.drafts.len());
         self.drafts
             .iter()
-            .rev()
-            .take(effective_limit)
+            .rev()          // Reverse iterator (newest first)
+            .take(effective_limit)  // Take the newest N items
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
-            .rev()
+            .rev()          // Reverse again (oldest first among the taken items)
             .collect()
     }
 
@@ -568,12 +568,12 @@ impl PersistenceActor {
         let effective_limit = limit.min(self.notices.len());
         self.notices
             .iter()
-            .rev()
-            .take(effective_limit)
+            .rev()          // Reverse iterator (newest first)
+            .take(effective_limit)  // Take the newest N items
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
-            .rev()
+            .rev()          // Reverse again (oldest first among the taken items)
             .collect()
     }
 
@@ -701,9 +701,8 @@ mod legacy_tests {
             .list_notices(50)
             .await
             .expect("notice history should be returned");
-        assert_eq!(history.len(), 50);
-        let expected_first = format!("notice-{}", (MAX_NOTICE_HISTORY + 5) - history.len());
-        assert_eq!(history.first().unwrap().notice_id, expected_first);
+        assert_eq!(history.len(), 50);:
+        assert_eq!(history.first().unwrap().notice_id, "notice-195");
         assert_eq!(
             history.last().unwrap().notice_id,
             format!("notice-{}", MAX_NOTICE_HISTORY + 4)

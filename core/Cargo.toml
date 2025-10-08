@@ -39,6 +39,10 @@ default = ["local-asr", "sqlcipher-persistence"]
 local-asr = ["whisper-rs"]
 cloud-asr = []
 sqlcipher-persistence = ["rusqlite", "r2d2", "r2d2_sqlite"]
+whisper-rs = ["dep:whisper-rs"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[patch.crates-io]
+whisper-rs-sys = { path = "../vendor/whisper-rs-sys" }

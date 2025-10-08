@@ -6,6 +6,9 @@ The monorepo groups client, core, and service layers. `apps/desktop/` contains t
 ## Build, Test, and Development Commands
 Use `./scripts/build_all.sh` for a full pipeline run; set `RUN_TAURI_BUNDLE=1` to request a native desktop bundle. Work iteratively per module: `cargo run` (or `cargo test`) in `core/`, `npm run dev` / `npm run build` in `apps/desktop`, `npm run dev` / `npm run build` in `services/admin_console`, `go run main.go` in `services/hybrid_router`, and `uvicorn flowwisper_api.main:app --reload` inside `services/api_gateway` after `pip install -e .[dev]`.
 
+You ALWAYS run test for apps/desktop module when you do any coding in this folder. The test command is: 
+`cargo test --manifest-path src-tauri/Cargo.toml --lib`
+
 ## Coding Style & Naming Conventions
 Adopt idiomatic language defaults. For Rust modules (`core/`, `apps/desktop/src-tauri/`), run `cargo fmt --all` and keep files snake_case with public types in PascalCase. Front-end TypeScript favors two-space indentation, PascalCase React components, and `use`-prefixed hooks; colocate component styles within `apps/desktop/src/`. For Next.js, follow the same conventions and keep route folders kebab-case. Python code in `flowwisper_api/` should satisfy PEP 8; prefer dataclass-style settings objects and validate configs with `pydantic`. Go packages in `services/hybrid_router/` must pass `gofmt`/`goimports`; expose only deliberate interfaces. 将单个源文件控制在 800 行以内，必要时抽取子模块或组件。
 

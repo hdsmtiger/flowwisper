@@ -214,12 +214,8 @@ fn downsample_average(samples: &[f32], factor: usize, target_len: usize) -> Vec<
             downsampled.push(0.0);
             continue;
         }
-        let mut acc = 0.0;
-        for sample in &samples[start..end] {
-            acc += *sample;
-        }
-        let averaged = acc / (end - start) as f32 / 32_768.0;
-        downsampled.push(averaged.clamp(-1.0, 1.0));
+        let acc: f32 = samples[start..end].iter().sum();
+        downsampled.push(acc / (end - start) as f32);
     }
     downsampled
 }
@@ -711,7 +707,7 @@ New-ItemProperty -Path $path -Name 'ATFriendlyName' -Value 'Flowwisper' -Force |
 }
 
 #[cfg(test)]
-mod tests {
+mod windows_tests {
     use super::{
         compose_windows_accessibility_response, PermissionCheck, WindowsAccessibilityFlow,
     };
@@ -989,6 +985,7 @@ fn request_microphone_permission_macos() -> Result<PermissionCheck, String> {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn request_microphone_permission_windows() -> Result<PermissionCheck, String> {
     use tauri::async_runtime::block_on;
     use windows::core::Error;
@@ -1034,20 +1031,17 @@ fn request_microphone_permission_windows() -> Result<PermissionCheck, String> {
 #[cfg(target_os = "macos")]
 fn request_accessibility_permission_macos(prompt: bool) -> Result<PermissionCheck, String> {
     use accessibility_sys::{kAXTrustedCheckOptionPrompt, AXIsProcessTrustedWithOptions};
+    use core_foundation::base::TCFType;
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFMutableDictionary;
     use core_foundation::string::CFString;
 
     unsafe {
-        let dictionary = CFMutableDictionary::new();
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
-        let value = if prompt {
-            CFBoolean::true_value()
-        } else {
-            CFBoolean::false_value()
-        };
-        dictionary.set(&key, &value);
-        let trusted = AXIsProcessTrustedWithOptions(dictionary.as_concrete_TypeRef());
+        let value = CFBoolean::from(prompt);
+        let mut options = CFMutableDictionary::<CFString, CFBoolean>::new();
+        options.set(key, value);
+        let trusted = AXIsProcessTrustedWithOptions(options.to_immutable().as_concrete_TypeRef());
         if trusted {
             Ok(PermissionCheck {
                 granted: true,
@@ -1173,6 +1167,12 @@ fn capture_audio(
                 err_fn,
                 None,
             )
+        }
+        other => {
+            return Err(format!(
+                "不支持的音频采样格式: {:?}. 请切换到 PCM16/PCM32 设备",
+                other
+            ));
         }
     }
     .map_err(|err| format!("构建输入流失败: {err}"))?;
@@ -1807,18 +1807,20 @@ fn encode_wave(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
         bits_per_sample: 16,
         sample_format: WavSampleFormat::Int,
     };
-    let cursor = Cursor::new(Vec::new());
-    let mut writer =
-        WavWriter::new(cursor, spec).map_err(|err| format!("写入波形数据失败: {err}"))?;
-    for sample in samples {
-        let value = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer =
+            WavWriter::new(&mut cursor, spec).map_err(|err| format!("写入波形数据失败: {err}"))?;
+        for sample in samples {
+            let value = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            writer
+                .write_sample(value)
+                .map_err(|err| format!("写入音频样本失败: {err}"))?;
+        }
         writer
-            .write_sample(value)
-            .map_err(|err| format!("写入音频样本失败: {err}"))?;
+            .finalize()
+            .map_err(|err| format!("关闭音频缓冲失败: {err}"))?;
     }
-    let cursor = writer
-        .into_inner()
-        .map_err(|err| format!("关闭音频缓冲失败: {err}"))?;
     Ok(cursor.into_inner())
 }
 

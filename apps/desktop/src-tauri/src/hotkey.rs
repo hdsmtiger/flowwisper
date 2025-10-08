@@ -658,7 +658,7 @@ impl AppState {
             .map_err(|_| "invalid sample encryption key material".to_string())?;
         let key = aead::LessSafeKey::new(key);
         let mut buffer = wav_bytes.to_vec();
-        buffer.extend_from_slice(&[0u8; aead::AES_256_GCM.tag_len()]);
+        buffer.reserve(aead::AES_256_GCM.tag_len());
         key.seal_in_place_append_tag(
             aead::Nonce::assume_unique_for_key(nonce),
             aead::Aad::from(SAMPLE_ENVELOPE_AAD),
@@ -908,17 +908,15 @@ pub fn load_or_create_hmac_key(config_path: &Path) -> Result<Vec<u8>, String> {
 
     #[cfg(target_os = "macos")]
     {
-        use security_framework::{
-            base::errSecItemNotFound,
-            passwords::{find_generic_password, set_generic_password},
-        };
+        use security_framework::passwords::{get_generic_password, set_generic_password};
 
         const SERVICE: &str = "flowwisper.hotkey";
         const ACCOUNT: &str = "fn_hmac";
+        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
-        match find_generic_password(SERVICE, ACCOUNT) {
+        match get_generic_password(SERVICE, ACCOUNT) {
             Ok(secret) => return Ok(secret),
-            Err(err) if err.code() == errSecItemNotFound => {
+            Err(err) if err.code() == ERR_SEC_ITEM_NOT_FOUND => {
                 let mut generated = [0u8; 32];
                 OsRng
                     .try_fill_bytes(&mut generated)
@@ -1121,7 +1119,7 @@ impl HotkeyCompatibilityLayer {
                                 modifiers.insert(key);
                                 return;
                             }
-                            if key == Key::Fn {
+                            if key == Key::Function {
                                 let _ = sender
                                     .send(CaptureSignal::Error("Fn 键无法作为备用组合主键".into()));
                                 panic!("stop-listener");
@@ -1208,28 +1206,16 @@ impl HotkeyCompatibilityLayer {
             Key::F10 => Some("F10".into()),
             Key::F11 => Some("F11".into()),
             Key::F12 => Some("F12".into()),
-            Key::F13 => Some("F13".into()),
-            Key::F14 => Some("F14".into()),
-            Key::F15 => Some("F15".into()),
-            Key::F16 => Some("F16".into()),
-            Key::F17 => Some("F17".into()),
-            Key::F18 => Some("F18".into()),
-            Key::F19 => Some("F19".into()),
-            Key::F20 => Some("F20".into()),
-            Key::F21 => Some("F21".into()),
-            Key::F22 => Some("F22".into()),
-            Key::F23 => Some("F23".into()),
-            Key::F24 => Some("F24".into()),
-            Key::Key0 => Some("0".into()),
-            Key::Key1 => Some("1".into()),
-            Key::Key2 => Some("2".into()),
-            Key::Key3 => Some("3".into()),
-            Key::Key4 => Some("4".into()),
-            Key::Key5 => Some("5".into()),
-            Key::Key6 => Some("6".into()),
-            Key::Key7 => Some("7".into()),
-            Key::Key8 => Some("8".into()),
-            Key::Key9 => Some("9".into()),
+            Key::Num0 => Some("0".into()),
+            Key::Num1 => Some("1".into()),
+            Key::Num2 => Some("2".into()),
+            Key::Num3 => Some("3".into()),
+            Key::Num4 => Some("4".into()),
+            Key::Num5 => Some("5".into()),
+            Key::Num6 => Some("6".into()),
+            Key::Num7 => Some("7".into()),
+            Key::Num8 => Some("8".into()),
+            Key::Num9 => Some("9".into()),
             Key::KeyA => Some("A".into()),
             Key::KeyB => Some("B".into()),
             Key::KeyC => Some("C".into()),
@@ -1260,12 +1246,35 @@ impl HotkeyCompatibilityLayer {
             Key::Equal => Some("=".into()),
             Key::LeftBracket => Some("[".into()),
             Key::RightBracket => Some("]".into()),
-            Key::Semicolon => Some(";".into()),
+            Key::SemiColon => Some(";".into()),
             Key::Quote => Some("'".into()),
             Key::Comma => Some(",".into()),
             Key::Dot => Some(".".into()),
             Key::Slash => Some("/".into()),
             Key::BackSlash => Some("\\".into()),
+            Key::BackQuote => Some("`".into()),
+            Key::Function => Some("Fn".into()),
+            Key::PrintScreen => Some("PrintScreen".into()),
+            Key::ScrollLock => Some("ScrollLock".into()),
+            Key::Pause => Some("Pause".into()),
+            Key::NumLock => Some("NumLock".into()),
+            Key::KpDivide => Some("Kp/".into()),
+            Key::KpMultiply => Some("Kp*".into()),
+            Key::KpMinus => Some("Kp-".into()),
+            Key::KpPlus => Some("Kp+".into()),
+            Key::KpReturn => Some("KpEnter".into()),
+            Key::Kp0 => Some("NumPad0".into()),
+            Key::Kp1 => Some("NumPad1".into()),
+            Key::Kp2 => Some("NumPad2".into()),
+            Key::Kp3 => Some("NumPad3".into()),
+            Key::Kp4 => Some("NumPad4".into()),
+            Key::Kp5 => Some("NumPad5".into()),
+            Key::Kp6 => Some("NumPad6".into()),
+            Key::Kp7 => Some("NumPad7".into()),
+            Key::Kp8 => Some("NumPad8".into()),
+            Key::Kp9 => Some("NumPad9".into()),
+            Key::KpDelete => Some("NumPadDel".into()),
+            Key::Unknown(code) => Some(format!("Keycode({code})")),
             _ => None,
         }
     }
@@ -1711,6 +1720,7 @@ mod tests {
                     noise_alert: false,
                     noise_hint: None,
                     strong_noise_mode: false,
+                    frame_window_ms: None,
                 },
             )
             .expect("calibration persistence");
