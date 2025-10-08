@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -23,6 +23,9 @@ const createTranscriptState = (
 ): DualViewTranscriptState => ({
   sentences: [],
   notices: [],
+  publishUpdates: [],
+  publishResults: [],
+  publishNotices: [],
   selectedSentenceIds: [],
   pendingSelections: {},
   isHydrated: true,
@@ -71,8 +74,11 @@ describe("DualViewPanel", () => {
 
     render(<DualViewPanel transcript={state} />);
 
-    expect(screen.getByText("raw sentence")).toBeInTheDocument();
-    expect(screen.getByText("polished sentence")).toBeInTheDocument();
+    const rawList = screen.getByRole("list", { name: /original transcript/i });
+    const polishedList = screen.getByRole("list", { name: /polished transcript/i });
+
+    expect(within(rawList).getByText("raw sentence")).toBeInTheDocument();
+    expect(within(polishedList).getByText("polished sentence")).toBeInTheDocument();
     expect(focusSentence).toHaveBeenCalledWith(1);
     expect(
       screen.getByText("Conversational tone · Light grammar fixes"),
@@ -170,6 +176,227 @@ describe("DualViewPanel", () => {
     fireEvent.scroll(rawList);
 
     expect(polishedList.scrollTop).toBe(120);
+  });
+
+  it("disables copy action until polished text is available", () => {
+    const state = createTranscriptState();
+    render(<DualViewPanel transcript={state} />);
+
+    const copyButton = screen.getByRole("button", {
+      name: /copy polished text/i,
+    });
+    expect(copyButton).toBeDisabled();
+  });
+
+  it("renders persisted publish notices when history is expanded", () => {
+    const notices = [
+      {
+        sessionId: "session",
+        action: "copy" as const,
+        level: "warn" as const,
+        message: "Clipboard fallback triggered",
+        undoToken: null,
+        timestampMs: Date.now(),
+      },
+      {
+        sessionId: "session",
+        action: "insert" as const,
+        level: "info" as const,
+        message: "Polished transcript inserted",
+        undoToken: null,
+        timestampMs: Date.now() + 1,
+      },
+    ];
+
+    const state = createTranscriptState({ publishNotices: notices });
+    render(<DualViewPanel transcript={state} />);
+
+    const toggleHistory = screen.getByRole("button", { name: /show history/i });
+    fireEvent.click(toggleHistory);
+
+    expect(toggleHistory).toHaveTextContent(/hide history/i);
+    expect(screen.getByRole("heading", { name: /recent notices/i })).toBeInTheDocument();
+    expect(screen.getByText("Clipboard fallback triggered")).toBeInTheDocument();
+    expect(screen.getByText("Polished transcript inserted")).toBeInTheDocument();
+  });
+
+  it("copies polished transcript content when requested", async () => {
+    const sentence: DualViewSentence = {
+      id: 8,
+      firstFrameIndex: 0,
+      lastUpdated: Date.now(),
+      activeVariant: "polished",
+      raw: buildVariant({ text: "raw" }),
+      polished: buildVariant({ text: "polished body", source: "polished" }),
+      pendingVariant: null,
+      ariaLabel: "Sentence 8",
+    };
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const navigatorWithClipboard = navigator as Navigator & {
+      clipboard?: { writeText: (text: string) => Promise<void> };
+    };
+    const originalClipboard = navigatorWithClipboard.clipboard;
+    Object.assign(navigatorWithClipboard, {
+      clipboard: { writeText },
+    });
+
+    try {
+      const state = createTranscriptState({ sentences: [sentence] });
+      render(<DualViewPanel transcript={state} />);
+
+      const copyButton = screen.getByRole("button", {
+        name: /copy polished text/i,
+      });
+      expect(copyButton).toBeEnabled();
+
+      await act(async () => {
+        fireEvent.click(copyButton);
+      });
+
+      expect(writeText).toHaveBeenCalledWith("polished body");
+    } finally {
+      Object.assign(navigatorWithClipboard, { clipboard: originalClipboard });
+    }
+  });
+
+  it("renders publishing failure details with retry messaging", () => {
+    const sentence: DualViewSentence = {
+      id: 12,
+      firstFrameIndex: 0,
+      lastUpdated: Date.now(),
+      activeVariant: "polished",
+      raw: buildVariant({ text: "raw text" }),
+      polished: buildVariant({ text: "polished text", source: "polished" }),
+      pendingVariant: null,
+      ariaLabel: "Sentence 12",
+    };
+
+    const state = createTranscriptState({
+      sentences: [sentence],
+      publishUpdates: [
+        {
+          sessionId: "session-a",
+          attempt: 1,
+          strategy: "directInsert",
+          fallback: null,
+          retrying: false,
+          detail: "Initial attempt",
+          timestampMs: 10,
+        },
+        {
+          sessionId: "session-a",
+          attempt: 2,
+          strategy: "clipboardFallback",
+          fallback: "clipboardCopy",
+          retrying: true,
+          detail: "Focus lost, retrying",
+          timestampMs: 20,
+        },
+      ],
+      publishResults: [
+        {
+          sessionId: "session-a",
+          status: "failed",
+          strategy: "clipboardFallback",
+          attempts: 2,
+          fallback: "clipboardCopy",
+          failure: {
+            code: "focus-lost",
+            message: "Target window lost focus",
+          },
+          undoToken: "undo-token",
+          timestampMs: 30,
+        },
+      ],
+      publishNotices: [
+        {
+          sessionId: "session-a",
+          action: "undoPrompt",
+          level: "warn",
+          message: "Use Ctrl+Z to undo",
+          undoToken: "undo-token",
+          timestampMs: 40,
+        },
+      ],
+    });
+
+    render(<DualViewPanel transcript={state} />);
+
+    expect(
+      screen.getByText(/Automatic insertion failed after 2 attempt/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Copied the transcript to your clipboard as a fallback/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Reason: Target window lost focus/i)).toBeInTheDocument();
+    expect(screen.getByText(/Error code: focus-lost/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Undo is available via Ctrl\/Cmd\+Z or from the clipboard backup/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Use Ctrl\+Z to undo/i)).toBeInTheDocument();
+  });
+
+  it("reveals publishing history and notices when toggled", () => {
+    const state = createTranscriptState({
+      publishUpdates: [
+        {
+          sessionId: "session-b",
+          attempt: 1,
+          strategy: "directInsert",
+          fallback: null,
+          retrying: false,
+          detail: "Attempted direct insert",
+          timestampMs: 5,
+        },
+        {
+          sessionId: "session-b",
+          attempt: 2,
+          strategy: "clipboardFallback",
+          fallback: "clipboardCopy",
+          retrying: false,
+          detail: "Copied to clipboard",
+          timestampMs: 10,
+        },
+      ],
+      publishResults: [
+        {
+          sessionId: "session-b",
+          status: "deferred",
+          strategy: "clipboardFallback",
+          attempts: 2,
+          fallback: "clipboardCopy",
+          failure: {
+            code: "timeout",
+            message: "Manual paste required",
+          },
+          undoToken: null,
+          timestampMs: 15,
+        },
+      ],
+      publishNotices: [
+        {
+          sessionId: "session-b",
+          action: "copy",
+          level: "info",
+          message: "Copied to clipboard",
+          undoToken: null,
+          timestampMs: 20,
+        },
+      ],
+    });
+
+    render(<DualViewPanel transcript={state} />);
+
+    const toggleButton = screen.getByRole("button", { name: /show history/i });
+    fireEvent.click(toggleButton);
+
+    expect(screen.getByText(/Publishing attempts/i)).toBeInTheDocument();
+    expect(screen.getByText(/Attempt 2/i)).toBeInTheDocument();
+    expect(screen.getByText(/Fallback: Clipboard copy/i)).toBeInTheDocument();
+    expect(screen.getByText(/Detail: Copied to clipboard/i)).toBeInTheDocument();
+    expect(screen.getByText(/Recent notices/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Copied to clipboard/i)).not.toHaveLength(0);
   });
 
   it("renders selection controls for polished sentences", async () => {
