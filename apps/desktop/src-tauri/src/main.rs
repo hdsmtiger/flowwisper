@@ -3,10 +3,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
-use tauri::{
-    AppHandle, CustomMenuItem, Manager, State, SystemTray, SystemTrayEvent, SystemTrayMenu,
-    SystemTrayMenuItem,
-};
+use tauri::{AppHandle, Manager, State};
 
 mod audio;
 mod hotkey;
@@ -19,11 +16,11 @@ use audio::{
     prime_waveform_bridge,
     request_accessibility_permission as request_system_accessibility_permission,
     request_microphone_permission as request_system_microphone_permission, run_device_check,
-    CalibrationComputation, DeviceTestReport, FrameWindowSetting,
+    DeviceTestReport, FrameWindowSetting,
 };
 use hotkey::{
     load_hotkey_config, load_or_create_hmac_key, AppState, FnProbeResult, HotkeyBinding,
-    HotkeyCompatibilityLayer, HotkeySource, TutorialStatus,
+    HotkeyCompatibilityLayer, HotkeySource,
 };
 use session::{SessionStatus, TranscriptSentenceSelection, TranscriptStreamEvent};
 
@@ -113,30 +110,18 @@ struct EnginePreference {
     privacy_notice: String,
 }
 
-const HOTKEY_TRAY_ID: &str = "hotkey_display";
-
-fn build_tray() -> SystemTray {
-    let tray_menu = SystemTrayMenu::new()
-        .add_item(CustomMenuItem::new(HOTKEY_TRAY_ID, "当前热键: Fn").disabled())
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(CustomMenuItem::new("quit", "退出").accelerator("CmdOrCtrl+Q"));
-
-    SystemTray::new().with_menu(tray_menu)
-}
-
 fn resolve_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     let mut path = app
-        .path_resolver()
+        .path()
         .app_config_dir()
-        .ok_or_else(|| "missing config directory".to_string())?;
+        .map_err(|err| err.to_string())?;
     path.push("hotkey.json");
     Ok(path)
 }
 
 fn update_tray_hotkey(app: &AppHandle, binding: &HotkeyBinding) {
-    if let Some(tray) = app.tray_handle().get_item(HOTKEY_TRAY_ID).ok() {
-        let _ = tray.set_title(format!("当前热键: {}", binding.combination));
-    }
+    let _ = app;
+    let _ = binding;
 }
 
 impl HotkeyCompatibilityLayer {
@@ -151,28 +136,9 @@ impl HotkeyCompatibilityLayer {
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let mut manager = app.global_shortcut();
-            if manager
-                .is_registered(combination)
-                .map_err(|err| format!("failed to query shortcut: {err}"))?
-            {
-                return Ok(Some(format!("{combination}")));
-            }
-
-            match manager.register(combination, || {}) {
-                Ok(()) => {
-                    let _ = manager.unregister(combination);
-                    Ok(None)
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    if message.to_lowercase().contains("already") {
-                        Ok(Some(combination.to_string()))
-                    } else {
-                        Err(format!("无法在系统中注册组合 {combination}: {message}"))
-                    }
-                }
-            }
+            let _ = app;
+            let _ = combination;
+            return Ok(None);
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -181,7 +147,7 @@ impl HotkeyCompatibilityLayer {
             let _ = combination;
             Ok(None)
         }
-    }
+}
 }
 
 #[tauri::command]
@@ -1031,7 +997,6 @@ mod tests {
 
 fn main() {
     tauri::Builder::default()
-        .system_tray(build_tray())
         .invoke_handler(tauri::generate_handler![
             session_status,
             session_timeline,
@@ -1067,7 +1032,8 @@ fn main() {
             persist_hotkey_binding
         ])
         .setup(|app| {
-            let config_path = resolve_config_path(app)?;
+            let handle = app.handle();
+            let config_path = resolve_config_path(&handle)?;
             let hmac_key = load_or_create_hmac_key(&config_path)?;
             let initial_binding = load_hotkey_config(&config_path, &hmac_key).unwrap_or_default();
             app.manage(AppState::new(
@@ -1075,17 +1041,12 @@ fn main() {
                 hmac_key,
                 initial_binding.clone(),
             ));
-            update_tray_hotkey(app, &initial_binding);
-            let window = app.get_window("main").expect("main window should exist");
+            update_tray_hotkey(&handle, &initial_binding);
+            let window = handle
+                .get_webview_window("main")
+                .expect("main window should exist");
             window.set_title("Flowwisper Fn").ok();
             Ok(())
-        })
-        .on_system_tray_event(|app, event| {
-            if let SystemTrayEvent::MenuItemClick { id, .. } = event {
-                if id.as_str() == "quit" {
-                    app.exit(0);
-                }
-            }
         })
         .run(tauri::generate_context!())
         .expect("error while running Flowwisper desktop shell");

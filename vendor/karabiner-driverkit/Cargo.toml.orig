@@ -1,0 +1,20 @@
+[package]
+name = "karabiner-driverkit"
+version = "0.2.0"
+authors = ["Psych3r <abdalrahman.mursi@gmail.com>"]
+description = "Minimal Karabiner-DriverKit-VirtualHIDDevice wrapper for kanata"
+keywords = ["library", "macos", "keyboard", "karabiner", "kanata"]
+categories = ["api-bindings"]
+homepage = "https://github.com/Psych3r/driverkit"
+repository = "https://github.com/Psych3r/driverkit"
+readme = "README.md"
+license = "LGPL-3.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+os_info = "3.7.0"

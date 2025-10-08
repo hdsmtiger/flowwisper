@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export FLOWWISPER_ROOT="$ROOT_DIR"
+RUN_TAURI_BUNDLE="${RUN_TAURI_BUNDLE:-1}"
+TAURI_BUILD_TARGETS="${TAURI_BUILD_TARGETS:-}"
 
 section() {
   echo -e "\n==== $1 ====\n"
@@ -17,9 +19,20 @@ section "Desktop shell: npm install & build"
 pushd "$ROOT_DIR/apps/desktop" >/dev/null
 npm install
 npm run build
-if [[ "${RUN_TAURI_BUNDLE:-0}" == "1" ]]; then
+if [[ "$RUN_TAURI_BUNDLE" == "1" ]]; then
   if npx --yes tauri --help >/dev/null 2>&1; then
-    npx --yes tauri build
+    build_cmd=(npx --yes tauri build)
+    if [[ -n "$TAURI_BUILD_TARGETS" ]]; then
+      for target in $TAURI_BUILD_TARGETS; do
+        build_cmd+=(--target "$target")
+      done
+    fi
+    if [[ -n "$TAURI_BUILD_TARGETS" ]]; then
+      echo "Running \\${build_cmd[*]}"
+    else
+      echo "Running tauri build for host platform"
+    fi
+    "${build_cmd[@]}"
   else
     echo "(skip) tauri CLI not available; skipping native bundle"
   fi

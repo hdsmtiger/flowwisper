@@ -189,29 +189,42 @@ mod tests {
                     saw_latency = true;
                 }
                 EVENT_REVERT => {
-                    assert_eq!(
-                        fields.get("requested_count").and_then(|v| v.as_u64()),
-                        Some(1)
-                    );
-                    assert_eq!(
-                        fields.get("applied_count").and_then(|v| v.as_u64()),
-                        Some(1)
-                    );
                     let payload = fields
                         .get("payload")
                         .and_then(|value| value.as_str())
                         .expect("revert payload string");
                     let payload_json: Value =
                         serde_json::from_str(payload).expect("revert payload json");
-                    assert_eq!(
-                        payload_json["requested"].as_array().map(|arr| arr.len()),
-                        Some(1)
-                    );
-                    assert_eq!(
-                        payload_json["applied"].as_array().map(|arr| arr.len()),
-                        Some(1)
-                    );
-                    saw_revert = true;
+
+                    let requested = payload_json["requested"].as_array();
+                    let applied = payload_json["applied"].as_array();
+
+                    let requested_len = requested.map(|arr| arr.len()).unwrap_or(0);
+                    let applied_len = applied.map(|arr| arr.len()).unwrap_or(0);
+
+                    if requested_len == 1
+                        && applied_len == 1
+                        && requested
+                            .and_then(|arr| arr.first())
+                            .and_then(|entry| entry["sentence_id"].as_u64())
+                            == Some(7)
+                        && applied
+                            .and_then(|arr| arr.first())
+                            .and_then(|entry| entry["sentence_id"].as_u64())
+                            == Some(7)
+                    {
+                        assert_eq!(
+                            fields.get("requested_count").and_then(|v| v.as_u64()),
+                            Some(requested_len as u64)
+                        );
+                        assert_eq!(
+                            fields.get("applied_count").and_then(|v| v.as_u64()),
+                            Some(applied_len as u64)
+                        );
+                        assert_eq!(requested_len, 1);
+                        assert_eq!(applied_len, 1);
+                        saw_revert = true;
+                    }
                 }
                 other => panic!("unexpected telemetry event: {other}"),
             }

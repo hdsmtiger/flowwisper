@@ -1,0 +1,202 @@
+set(_DEPS_type_safe "debug_assert")
+set(_DEPS_pqrs_cf_array "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_cf_dictionary "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_cf_json
+  "pqrs_cf_array"
+  "pqrs_cf_dictionary"
+  "pqrs_cf_number"
+  "pqrs_cf_set"
+  "pqrs_cf_string"
+  "pqrs_json"
+  "type_safe"
+)
+set(_DEPS_pqrs_cf_number "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_cf_run_loop_thread
+  "pqrs_cf_cf_ptr"
+  "pqrs_thread_wait"
+)
+set(_DEPS_pqrs_cf_set "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_cf_string "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_cf_url "pqrs_cf_string")
+set(_DEPS_pqrs_dispatcher "pqrs_thread_wait")
+set(_DEPS_pqrs_environment_variable "pqrs_string")
+set(_DEPS_pqrs_hid
+  "pqrs_hash"
+  "pqrs_json"
+  "type_safe"
+)
+set(_DEPS_pqrs_json
+  "nlohmann_json"
+  "pqrs_string"
+)
+set(_DEPS_pqrs_local_datagram
+  "asio"
+  "nod"
+  "pqrs_dispatcher"
+)
+set(_DEPS_pqrs_osx_accessibility "pqrs_cf_dictionary")
+set(_DEPS_pqrs_osx_cg_display "pqrs_osx_cg_event")
+set(_DEPS_pqrs_osx_cg_event "pqrs_cf_cf_ptr")
+set(_DEPS_pqrs_osx_chrono
+  "pqrs_json"
+  "type_safe"
+)
+set(_DEPS_pqrs_osx_codesign
+  "pqrs_cf_array"
+  "pqrs_cf_dictionary"
+  "pqrs_cf_number"
+  "pqrs_cf_string"
+)
+set(_DEPS_pqrs_osx_file_monitor
+  "nod"
+  "pqrs_cf_array"
+  "pqrs_cf_string"
+  "pqrs_dispatcher"
+  "pqrs_environment_variable"
+  "pqrs_filesystem"
+  "type_safe"
+)
+set(_DEPS_pqrs_osx_frontmost_application_monitor
+  "nod"
+  "pqrs_dispatcher"
+  "pqrs_hash"
+)
+set(_DEPS_pqrs_osx_input_source
+  "pqrs_cf_array"
+  "pqrs_cf_dictionary"
+  "pqrs_cf_string"
+  "pqrs_gcd"
+  "pqrs_hash"
+  "pqrs_json"
+)
+set(_DEPS_pqrs_osx_input_source_monitor
+  "nod"
+  "pqrs_dispatcher"
+  "pqrs_osx_input_source"
+)
+set(_DEPS_pqrs_osx_input_source_selector
+  "pqrs_dispatcher"
+  "pqrs_json"
+  "pqrs_osx_input_source"
+)
+set(_DEPS_pqrs_osx_iokit_hid_device
+  "pqrs_cf_array"
+  "pqrs_cf_string"
+  "pqrs_hid"
+  "pqrs_osx_iokit_registry_entry"
+  "pqrs_osx_iokit_types"
+)
+set(_DEPS_pqrs_osx_iokit_hid_device_open_checker
+  "pqrs_osx_iokit_hid_manager"
+  "pqrs_osx_iokit_return"
+)
+set(_DEPS_pqrs_osx_iokit_hid_device_report_monitor
+  "nod"
+  "pqrs_cf_run_loop_thread"
+  "pqrs_dispatcher"
+  "pqrs_osx_iokit_hid_device"
+  "pqrs_osx_iokit_return"
+)
+set(_DEPS_pqrs_osx_iokit_hid_element
+  "pqrs_cf_cf_ptr"
+  "pqrs_cf_string"
+  "pqrs_hid"
+)
+set(_DEPS_pqrs_osx_iokit_hid_event_system_client
+  "pqrs_cf_array"
+  "pqrs_cf_number"
+  "pqrs_osx_iokit_types"
+)
+set(_DEPS_pqrs_osx_iokit_hid_manager
+  "pqrs_cf_number"
+  "pqrs_hid"
+  "pqrs_osx_iokit_service_monitor"
+)
+set(_DEPS_pqrs_osx_iokit_hid_queue_value_monitor
+  "nod"
+  "pqrs_cf_run_loop_thread"
+  "pqrs_dispatcher"
+  "pqrs_osx_iokit_hid_device"
+  "pqrs_osx_iokit_return"
+)
+set(_DEPS_pqrs_osx_iokit_hid_system
+  "eternal"
+  "pqrs_hid"
+  "pqrs_osx_iokit_service_monitor"
+)
+set(_DEPS_pqrs_osx_iokit_hid_value
+  "pqrs_hid"
+  "pqrs_osx_chrono"
+  "pqrs_osx_iokit_hid_element"
+  "pqrs_osx_iokit_types"
+)
+set(_DEPS_pqrs_osx_iokit_iterator "pqrs_osx_iokit_object_ptr")
+set(_DEPS_pqrs_osx_iokit_object_ptr "pqrs_osx_kern_return")
+set(_DEPS_pqrs_osx_iokit_registry_entry
+  "pqrs_cf_cf_ptr"
+  "pqrs_cf_string"
+  "pqrs_osx_iokit_iterator"
+  "pqrs_osx_iokit_types"
+)
+set(_DEPS_pqrs_osx_iokit_service_monitor
+  "nod"
+  "pqrs_cf_run_loop_thread"
+  "pqrs_dispatcher"
+  "pqrs_osx_iokit_iterator"
+  "pqrs_osx_iokit_object_ptr"
+  "pqrs_osx_iokit_registry_entry"
+  "pqrs_osx_iokit_types"
+  "pqrs_osx_kern_return"
+)
+set(_DEPS_pqrs_osx_iokit_types
+  "pqrs_hid"
+  "type_safe"
+)
+set(_DEPS_pqrs_osx_json_file_monitor
+  "nlohmann_json"
+  "pqrs_osx_file_monitor"
+)
+set(_DEPS_pqrs_osx_launch_services "pqrs_cf_string")
+set(_DEPS_pqrs_osx_launchctl
+  "pqrs_process"
+  "pqrs_string"
+  "type_safe"
+)
+set(_DEPS_pqrs_osx_machine
+  "pqrs_cf_string"
+  "type_safe"
+)
+set(_DEPS_pqrs_osx_process_info "pqrs_cf_string")
+set(_DEPS_pqrs_osx_session
+  "nod"
+  "pqrs_cf_boolean"
+  "pqrs_cf_number"
+  "pqrs_cf_string"
+  "pqrs_dispatcher"
+)
+set(_DEPS_pqrs_osx_system_preferences
+  "pqrs_cf_array"
+  "pqrs_cf_number"
+  "pqrs_cf_string"
+  "pqrs_hash"
+  "pqrs_hid"
+  "pqrs_osx_iokit_types"
+  "pqrs_osx_kern_return"
+)
+set(_DEPS_pqrs_osx_system_preferences_monitor
+  "nod"
+  "pqrs_dispatcher"
+  "pqrs_osx_system_preferences"
+)
+set(_DEPS_pqrs_process
+  "nod"
+  "pqrs_dispatcher"
+)
+set(_DEPS_pqrs_shell "pqrs_string")
+set(_DEPS_pqrs_spdlog
+  "nod"
+  "pqrs_dispatcher"
+  "spdlog"
+  "utfcpp"
+)
+set(_DEPS_pqrs_string "utfcpp")
