@@ -1,3 +1,4 @@
+use anyhow::Error;
 use serde::Serialize;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -14,6 +15,11 @@ pub(crate) const EVENT_PUBLISH_DEGRADATION: &str = "session_publish_degradation"
 pub(crate) const EVENT_DRAFT_SAVE_SUCCESS: &str = "session_draft_save_success";
 pub(crate) const EVENT_DRAFT_SAVE_FAILURE: &str = "session_draft_save_failure";
 pub(crate) const EVENT_PUBLISH_UNDO: &str = "session_publish_undo";
+pub(crate) const EVENT_HISTORY_PERSISTED: &str = "session_history_persisted";
+pub(crate) const EVENT_HISTORY_PERSIST_FAILURE: &str = "session_history_persist_failure";
+pub(crate) const EVENT_HISTORY_ACCURACY: &str = "session_history_accuracy";
+pub(crate) const EVENT_HISTORY_ACTION: &str = "session_history_action";
+pub(crate) const EVENT_HISTORY_CLEANUP: &str = "session_history_cleanup";
 
 #[derive(Debug, Serialize)]
 pub struct DualViewLatencyEvent {
@@ -347,6 +353,59 @@ pub fn record_session_publish_undo(session_id: &str, undo_token: Option<&str>, o
             "failed to encode publish undo event"
         ),
     }
+}
+
+pub fn record_session_history_persisted(session_id: &str, attempts: u8, duration: Duration) {
+    info!(
+        target: SESSION_TARGET,
+        event = EVENT_HISTORY_PERSISTED,
+        session_id,
+        attempts,
+        duration_ms = duration_to_ms(duration),
+        "session history persisted"
+    );
+}
+
+pub fn record_session_history_persist_failure(session_id: &str, attempts: u8, error: &Error) {
+    warn!(
+        target: SESSION_TARGET,
+        event = EVENT_HISTORY_PERSIST_FAILURE,
+        session_id,
+        attempts,
+        error = %error,
+        "session history persistence failed"
+    );
+}
+
+pub fn record_session_history_accuracy(session_id: &str, flag: &str, remarks: Option<&str>) {
+    info!(
+        target: SESSION_TARGET,
+        event = EVENT_HISTORY_ACCURACY,
+        session_id,
+        flag,
+        remarks,
+        "session history accuracy updated"
+    );
+}
+
+pub fn record_session_history_action(session_id: &str, action: &str) {
+    info!(
+        target: SESSION_TARGET,
+        event = EVENT_HISTORY_ACTION,
+        session_id,
+        action,
+        "session history action recorded"
+    );
+}
+
+pub fn record_session_history_cleanup(count: usize, duration: Duration) {
+    info!(
+        target: SESSION_TARGET,
+        event = EVENT_HISTORY_CLEANUP,
+        count,
+        duration_ms = duration_to_ms(duration),
+        "session history cleanup completed"
+    );
 }
 
 fn duration_to_ms(duration: Duration) -> u64 {

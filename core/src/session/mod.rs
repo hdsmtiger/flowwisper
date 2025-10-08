@@ -1,6 +1,7 @@
 //! 会话管理状态机脚手架。
 
 pub mod clipboard;
+pub mod history;
 pub mod lifecycle;
 pub mod publisher;
 
@@ -9,11 +10,15 @@ use crate::orchestrator::{
     EngineConfig, EngineOrchestrator, NoticeLevel, RealtimeSessionConfig, RealtimeSessionHandle,
     SessionNotice, TranscriptionUpdate, UpdatePayload,
 };
+use crate::persistence::sqlite::{EnvKeyResolver, SqliteConfig, SqlitePath, SqlitePersistence};
 use crate::persistence::{
     DraftRecord, DraftSaveRequest, NoticeSaveRequest, PersistenceActor, PersistenceCommand,
-    PersistenceHandle, TranscriptRecord,
+    PersistenceHandle,
 };
 use crate::session::clipboard::{ClipboardFallback, ClipboardManager};
+use crate::session::history::{
+    AccuracyUpdate, HistoryEntry, HistoryPage, HistoryPostAction, HistoryQuery, SessionSnapshot,
+};
 use crate::session::lifecycle::{
     SessionLifecyclePayload, SessionLifecyclePhase, SessionLifecycleUpdate,
 };
@@ -26,17 +31,57 @@ use crate::telemetry::events::{
     record_session_publish_degradation, record_session_publish_failure,
     record_session_publish_outcome,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use dirs::data_dir;
+use serde_json::json;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tokio::time::{timeout, Duration};
-use tracing::{info, warn};
+use tokio::time::{interval, timeout, Duration};
+use tracing::{error, info, warn};
 
 const CLIPBOARD_FALLBACK_TIMEOUT_MS: u64 = 200;
 const NOTICE_ACTION_COPY: &str = "copy";
 const NOTICE_RESULT_SUCCESS: &str = "success";
 const NOTICE_RESULT_FAILURE: &str = "failure";
+const HISTORY_CLEANUP_INTERVAL_SECS: u64 = 30 * 60;
+
+fn resolve_persistence_config() -> Result<SqliteConfig> {
+    let base_dir = match env::var("FLOWWISPER_DATA_DIR").map(PathBuf::from) {
+        Ok(path) => path,
+        Err(_) => data_dir()
+            .map(|dir| dir.join("Flowwisper"))
+            .ok_or_else(|| anyhow!("failed to resolve persistence data directory"))?,
+    };
+
+    fs::create_dir_all(&base_dir).context("failed to create data directory")?;
+    let db_path = base_dir.join("history.db");
+
+    Ok(SqliteConfig {
+        path: SqlitePath::File(db_path),
+        pool_size: 8,
+        busy_timeout: StdDuration::from_millis(250),
+        key_resolver: Arc::new(EnvKeyResolver::default()),
+    })
+}
+
+fn spawn_persistence_runtime(config: SqliteConfig) -> Result<PersistenceHandle> {
+    let sqlite = Arc::new(SqlitePersistence::bootstrap(config)?);
+    let (tx, rx) = mpsc::channel::<PersistenceCommand>(64);
+    let handle = PersistenceHandle::new(tx.clone(), sqlite.clone());
+
+    tokio::spawn(async move {
+        if let Err(err) = PersistenceActor::new(sqlite, rx).run().await {
+            error!(target: "persistence", %err, "persistence actor exited");
+        }
+    });
+
+    Ok(handle)
+}
 
 pub struct SessionManager {
     audio: AudioPipeline,
@@ -47,6 +92,7 @@ pub struct SessionManager {
     publisher: Arc<dyn SessionPublisher>,
     clipboard: ClipboardManager,
     clipboard_fallback: Arc<Mutex<Option<ClipboardFallback>>>,
+    history_cleanup_started: AtomicBool,
 }
 
 impl SessionManager {
@@ -92,12 +138,11 @@ impl SessionManager {
         publisher: Arc<dyn SessionPublisher>,
         clipboard: ClipboardManager,
     ) -> Self {
-        let (persistence_tx, persistence_rx) = mpsc::channel::<PersistenceCommand>(32);
-        let persistence = PersistenceHandle::new(persistence_tx);
+        let config = resolve_persistence_config().expect("persistence config should resolve");
+        let persistence =
+            spawn_persistence_runtime(config).expect("persistence runtime should spawn");
         let (update_tx, _) = broadcast::channel(64);
         let (lifecycle_tx, _) = broadcast::channel(32);
-
-        tokio::spawn(PersistenceActor::new(persistence_rx).run());
 
         Self {
             audio,
@@ -108,6 +153,7 @@ impl SessionManager {
             publisher,
             clipboard,
             clipboard_fallback: Arc::new(Mutex::new(None)),
+            history_cleanup_started: AtomicBool::new(false),
         }
     }
 
@@ -125,6 +171,7 @@ impl SessionManager {
         info!(target: "session_manager", "running bootstrap tasks");
         self.audio.start().await?;
         self.orchestrator.warmup().await?;
+        self.schedule_history_cleanup();
         Ok(())
     }
 
@@ -140,11 +187,11 @@ impl SessionManager {
         self.lifecycle_tx.subscribe()
     }
 
-    async fn persist_transcript(&self, record: TranscriptRecord) -> Result<()> {
+    async fn persist_transcript(&self, snapshot: SessionSnapshot) -> Result<()> {
         self.persistence
-            .save_transcript(record)
+            .persist_session(snapshot)
             .await
-            .map_err(|err| anyhow::anyhow!("failed to persist transcript: {err}"))
+            .map_err(|err| anyhow!("failed to persist transcript: {err}"))
     }
 
     fn emit_lifecycle(&self, update: SessionLifecycleUpdate) {
@@ -159,11 +206,10 @@ impl SessionManager {
 
     pub async fn publish_transcript(
         &self,
-        record: TranscriptRecord,
+        snapshot: SessionSnapshot,
         request: PublishRequest,
     ) -> Result<PublishOutcome> {
-        let session_id = record.session_id.clone();
-        self.persist_transcript(record).await?;
+        let session_id = snapshot.session_id.clone();
 
         let focus_context = request.focus.clone();
         let fallback_strategy = request.fallback.clone();
@@ -253,6 +299,15 @@ impl SessionManager {
                     outcome.fallback.as_ref().map(FallbackStrategy::as_str),
                 );
 
+                if matches!(
+                    outcome.status,
+                    PublisherStatus::Completed | PublisherStatus::Deferred
+                ) {
+                    if let Err(err) = self.persist_transcript(snapshot.clone()).await {
+                        self.handle_persistence_failure(&snapshot, err).await;
+                    }
+                }
+
                 Ok(outcome)
             }
             Err(err) => {
@@ -286,6 +341,38 @@ impl SessionManager {
                 Err(err)
             }
         }
+    }
+
+    pub async fn search_history(&self, query: HistoryQuery) -> Result<HistoryPage> {
+        self.persistence
+            .search_history(query)
+            .await
+            .map_err(|err| anyhow!("history search failed: {err}"))
+    }
+
+    pub async fn load_history_entry(&self, session_id: &str) -> Result<Option<HistoryEntry>> {
+        self.persistence
+            .load_session(session_id.to_string())
+            .await
+            .map_err(|err| anyhow!("history load failed: {err}"))
+    }
+
+    pub async fn update_history_accuracy(&self, update: AccuracyUpdate) -> Result<()> {
+        self.persistence
+            .update_accuracy(update)
+            .await
+            .map_err(|err| anyhow!("failed to update history accuracy: {err}"))
+    }
+
+    pub async fn record_history_action(
+        &self,
+        session_id: String,
+        action: HistoryPostAction,
+    ) -> Result<Vec<HistoryPostAction>> {
+        self.persistence
+            .append_post_action(session_id, action)
+            .await
+            .map_err(|err| anyhow!("failed to append history action: {err}"))
     }
 
     async fn attempt_clipboard_fallback(
@@ -411,6 +498,31 @@ impl SessionManager {
         }
     }
 
+    fn schedule_history_cleanup(&self) {
+        if self.history_cleanup_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let persistence = self.persistence.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(HISTORY_CLEANUP_INTERVAL_SECS));
+            loop {
+                ticker.tick().await;
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_millis() as i64)
+                    .unwrap_or(0);
+
+                if let Err(err) = persistence.cleanup_expired(now_ms).await {
+                    warn!(
+                        target: "session_manager",
+                        %err,
+                        "scheduled history cleanup failed"
+                    );
+                }
+            }
+        });
+    }
+
     async fn persist_notice_entry(
         &self,
         session_id: &str,
@@ -437,6 +549,69 @@ impl SessionManager {
                 "failed to persist publish notice"
             );
         }
+    }
+
+    async fn handle_persistence_failure(&self, snapshot: &SessionSnapshot, error: anyhow::Error) {
+        warn!(
+            target: "session_manager",
+            session_id = %snapshot.session_id,
+            %error,
+            "failed to persist session history"
+        );
+
+        let mut notice_message = format!("历史记录保存失败：{}。", error);
+
+        let clipboard_result = self
+            .clipboard
+            .write_with_backup(
+                &snapshot.polished_transcript,
+                Duration::from_millis(CLIPBOARD_FALLBACK_TIMEOUT_MS),
+            )
+            .await;
+
+        match clipboard_result {
+            Ok(fallback_handle) => {
+                {
+                    let mut guard = self.clipboard_fallback.lock().await;
+                    *guard = Some(fallback_handle);
+                }
+                notice_message.push_str("已将润色稿复制到剪贴板作为备份。");
+            }
+            Err(copy_err) => {
+                notice_message.push_str("且无法复制到剪贴板，请手动保存文本。");
+                warn!(
+                    target: "session_manager",
+                    session_id = %snapshot.session_id,
+                    %copy_err,
+                    "clipboard backup for persistence failure failed"
+                );
+            }
+        }
+
+        self.emit_notice(NoticeLevel::Error, notice_message.clone());
+        self.persist_notice_entry(
+            &snapshot.session_id,
+            NOTICE_ACTION_COPY,
+            NOTICE_RESULT_FAILURE,
+            NoticeLevel::Error,
+            notice_message,
+            None,
+        )
+        .await;
+
+        let payload = json!({
+            "session_id": snapshot.session_id,
+            "error": error.to_string(),
+        });
+
+        let _ = self
+            .persistence
+            .enqueue_telemetry(
+                snapshot.session_id.clone(),
+                "history_persist_failure".into(),
+                payload,
+            )
+            .await;
     }
 
     pub fn start_realtime_transcription(
@@ -559,6 +734,7 @@ mod tests {
     use crate::session::publisher::PublisherError;
     use anyhow::anyhow;
     use async_trait::async_trait;
+    use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Mutex as AsyncMutex;
@@ -609,6 +785,22 @@ mod tests {
             _request: PublishRequest,
         ) -> Result<PublishOutcome, PublisherError> {
             Ok(self.outcome.clone())
+        }
+    }
+
+    fn make_snapshot(session_id: &str, raw: &str, polished: &str) -> SessionSnapshot {
+        SessionSnapshot {
+            session_id: session_id.into(),
+            started_at_ms: 0,
+            completed_at_ms: 0,
+            locale: None,
+            app_identifier: Some("com.example.app".into()),
+            app_version: None,
+            confidence_score: None,
+            raw_transcript: raw.into(),
+            polished_transcript: polished.into(),
+            metadata: json!({}),
+            post_actions: vec![],
         }
     }
 
@@ -798,11 +990,7 @@ mod tests {
         let manager = SessionManager::with_orchestrator(orchestrator);
 
         let mut lifecycle_rx = manager.subscribe_lifecycle();
-        let record = TranscriptRecord {
-            session_id: "session-1".into(),
-            raw_text: "raw".into(),
-            polished_text: "polished".into(),
-        };
+        let snapshot = make_snapshot("session-1", "raw", "polished");
         let request = PublishRequest {
             transcript: "polished".into(),
             focus: FocusWindowContext::from_app_identifier("com.example.app"),
@@ -810,7 +998,7 @@ mod tests {
         };
 
         let outcome = manager
-            .publish_transcript(record, request)
+            .publish_transcript(snapshot, request)
             .await
             .expect("publish should succeed");
 
@@ -848,18 +1036,14 @@ mod tests {
         let manager = SessionManager::with_orchestrator(orchestrator);
 
         let mut lifecycle_rx = manager.subscribe_lifecycle();
-        let record = TranscriptRecord {
-            session_id: "session-2".into(),
-            raw_text: "raw".into(),
-            polished_text: "".into(),
-        };
+        let snapshot = make_snapshot("session-2", "raw", "");
         let request = PublishRequest {
             transcript: "   ".into(),
             focus: FocusWindowContext::default(),
             fallback: FallbackStrategy::NotifyOnly,
         };
 
-        let result = manager.publish_transcript(record, request).await;
+        let result = manager.publish_transcript(snapshot, request).await;
         assert!(result.is_err());
 
         let publishing_update = lifecycle_rx
@@ -903,11 +1087,7 @@ mod tests {
         let manager = SessionManager::with_components(orchestrator, publisher, clipboard);
 
         let mut updates_rx = manager.subscribe_updates();
-        let record = TranscriptRecord {
-            session_id: "session-fallback".into(),
-            raw_text: "raw".into(),
-            polished_text: "polished".into(),
-        };
+        let snapshot = make_snapshot("session-fallback", "raw", "polished");
         let request = PublishRequest {
             transcript: "polished".into(),
             focus: FocusWindowContext::default(),
@@ -915,7 +1095,7 @@ mod tests {
         };
 
         let outcome = manager
-            .publish_transcript(record, request)
+            .publish_transcript(snapshot, request)
             .await
             .expect("publish should succeed");
 
@@ -976,11 +1156,7 @@ mod tests {
         let manager = SessionManager::with_components(orchestrator, publisher, clipboard);
 
         let mut updates_rx = manager.subscribe_updates();
-        let record = TranscriptRecord {
-            session_id: "session-fallback-fail".into(),
-            raw_text: "raw".into(),
-            polished_text: "polished".into(),
-        };
+        let snapshot = make_snapshot("session-fallback-fail", "raw", "polished");
         let request = PublishRequest {
             transcript: "polished".into(),
             focus: FocusWindowContext::default(),
@@ -988,7 +1164,7 @@ mod tests {
         };
 
         let outcome = manager
-            .publish_transcript(record, request)
+            .publish_transcript(snapshot, request)
             .await
             .expect("publish should surface fallback failure");
 
