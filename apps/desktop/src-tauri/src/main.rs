@@ -25,7 +25,10 @@ use hotkey::{
     load_hotkey_config, load_or_create_hmac_key, AppState, FnProbeResult, HotkeyBinding,
     HotkeyCompatibilityLayer, HotkeySource, TutorialStatus,
 };
-use session::{SessionStatus, TranscriptSentenceSelection, TranscriptStreamEvent};
+use session::{
+    InsertionResult, PublishNotice, PublishingUpdate, SessionStatus, TranscriptSentenceSelection,
+    TranscriptStreamEvent,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HotkeyValidationResult {
@@ -197,6 +200,53 @@ fn session_timeline(state: State<AppState>) -> Result<Vec<SessionStatus>, String
 #[tauri::command]
 fn session_transcript_log(state: State<AppState>) -> Result<Vec<TranscriptStreamEvent>, String> {
     state.session.transcript_log()
+}
+
+#[tauri::command]
+fn session_publish_update(
+    app: AppHandle,
+    state: State<AppState>,
+    update: PublishingUpdate,
+) -> Result<(), String> {
+    state.session.emit_publishing_update(&app, update)
+}
+
+#[tauri::command]
+fn session_publish_result(
+    app: AppHandle,
+    state: State<AppState>,
+    result: InsertionResult,
+) -> Result<(), String> {
+    state.session.emit_insertion_result(&app, result)
+}
+
+#[tauri::command]
+fn session_publish_notice(
+    app: AppHandle,
+    state: State<AppState>,
+    notice: PublishNotice,
+) -> Result<(), String> {
+    state.session.emit_publish_notice(&app, notice)
+}
+
+#[tauri::command]
+fn session_publish_history(state: State<AppState>) -> Result<Vec<PublishingUpdate>, String> {
+    state.session.publishing_history()
+}
+
+#[tauri::command]
+fn session_publish_results(state: State<AppState>) -> Result<Vec<InsertionResult>, String> {
+    state.session.insertion_history()
+}
+
+#[tauri::command]
+fn session_publish_notices(state: State<AppState>) -> Result<Vec<PublishNotice>, String> {
+    state.session.publish_notice_history()
+}
+
+#[tauri::command]
+fn session_notice_center_history(state: State<AppState>) -> Result<Vec<PublishNotice>, String> {
+    state.session.publish_notice_history()
 }
 
 #[tauri::command]
@@ -1036,6 +1086,13 @@ fn main() {
             session_status,
             session_timeline,
             session_transcript_log,
+            session_publish_update,
+            session_publish_result,
+            session_publish_notice,
+            session_publish_history,
+            session_publish_results,
+            session_publish_notices,
+            session_notice_center_history,
             session_transcript_apply_selection,
             prime_session_preroll,
             mark_session_processing,

@@ -6,6 +6,219 @@
   height: 100%;
 }
 
+.dual-view-panel__result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 1.25rem;
+  background: linear-gradient(180deg, rgba(250, 245, 255, 0.92), rgba(255, 255, 255, 0.9));
+  box-shadow: 0 28px 48px rgba(79, 70, 229, 0.18);
+  border: 1px solid rgba(129, 140, 248, 0.25);
+  position: relative;
+  overflow: hidden;
+}
+
+.dual-view-panel__result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.dual-view-panel__result-status {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.dual-view-panel__result-status--info {
+  color: #312e81;
+}
+
+.dual-view-panel__result-status--success {
+  color: #047857;
+}
+
+.dual-view-panel__result-status--warn {
+  color: #b45309;
+}
+
+.dual-view-panel__result-status--error {
+  color: #b91c1c;
+}
+
+.dual-view-panel__result-meta {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: #475569;
+  font-size: 0.85rem;
+}
+
+.dual-view-panel__result-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.dual-view-panel__result-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dual-view-panel__result-heading {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #4338ca;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dual-view-panel__result-content {
+  background: rgba(255, 255, 255, 0.82);
+  border-radius: 1rem;
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  padding: 1rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #1f2937;
+}
+
+.dual-view-panel__result-content pre {
+  white-space: pre-wrap;
+  margin: 0;
+  font-family: inherit;
+}
+
+.dual-view-panel__result-placeholder {
+  margin: 0;
+  color: #818cf8;
+  font-style: italic;
+}
+
+.dual-view-panel__result-history {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.25rem;
+}
+
+.dual-view-panel__result-history-section h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #3730a3;
+}
+
+.dual-view-panel__result-history-section ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.dual-view-panel__result-history-empty {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.dual-view-panel__result-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: #334155;
+}
+
+.dual-view-panel__result-history-attempt {
+  font-weight: 700;
+  color: #4338ca;
+}
+
+.dual-view-panel__result-history-detail {
+  margin: 0;
+  color: #475569;
+  font-size: 0.8rem;
+}
+
+.dual-view-panel__result-notice {
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dual-view-panel__result-notice--info {
+  background: rgba(165, 180, 252, 0.25);
+  color: #3730a3;
+}
+
+.dual-view-panel__result-notice--warn {
+  background: rgba(253, 230, 138, 0.3);
+  color: #92400e;
+}
+
+.dual-view-panel__result-notice--error {
+  background: rgba(254, 202, 202, 0.28);
+  color: #b91c1c;
+}
+
+.dual-view-panel__result-toasts {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
+.dual-view-panel__result-toast {
+  padding: 0.65rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  box-shadow: 0 16px 32px rgba(79, 70, 229, 0.25);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+
+.dual-view-panel__result-toast--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.dual-view-panel__result-toast--hidden {
+  opacity: 0;
+  transform: translateY(-12px);
+}
+
+.dual-view-panel__result-toast--info {
+  background: linear-gradient(135deg, #6366f1, #7c3aed);
+}
+
+.dual-view-panel__result-toast--warn {
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+}
+
+.dual-view-panel__result-toast--error {
+  background: linear-gradient(135deg, #ef4444, #b91c1c);
+}
+
 .dual-view-panel__columns {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

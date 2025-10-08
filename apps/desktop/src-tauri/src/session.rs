@@ -5,7 +5,11 @@ use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter};
 
 const TRANSCRIPT_EVENT_CHANNEL: &str = "session://transcript";
+const LIFECYCLE_EVENT_CHANNEL: &str = "session://lifecycle";
+const PUBLISH_RESULT_CHANNEL: &str = "session://publish-result";
+const PUBLISH_NOTICE_CHANNEL: &str = "session://publish-notice";
 const MAX_TRANSCRIPT_HISTORY: usize = 120;
+const MAX_COMPLETION_HISTORY: usize = 120;
 
 fn current_timestamp_ms() -> u128 {
     SystemTime::now()
@@ -45,6 +49,9 @@ pub struct SessionStateManager {
     current: Arc<Mutex<SessionStatus>>,
     history: Arc<Mutex<Vec<SessionStatus>>>,
     transcript_history: Arc<Mutex<VecDeque<TranscriptStreamEvent>>>,
+    publishing_history: Arc<Mutex<VecDeque<PublishingUpdate>>>,
+    insertion_history: Arc<Mutex<VecDeque<InsertionResult>>>,
+    notice_history: Arc<Mutex<VecDeque<PublishNotice>>>,
 }
 
 impl SessionStateManager {
@@ -53,6 +60,9 @@ impl SessionStateManager {
             current: Arc::new(Mutex::new(SessionStatus::default())),
             history: Arc::new(Mutex::new(vec![SessionStatus::default()])),
             transcript_history: Arc::new(Mutex::new(VecDeque::new())),
+            publishing_history: Arc::new(Mutex::new(VecDeque::new())),
+            insertion_history: Arc::new(Mutex::new(VecDeque::new())),
+            notice_history: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -230,14 +240,18 @@ impl TranscriptStreamEvent {
 }
 
 impl SessionStateManager {
+    fn retain_with_limit<T>(history: &mut VecDeque<T>, event: T, limit: usize) {
+        history.push_back(event);
+        while history.len() > limit {
+            history.pop_front();
+        }
+    }
+
     fn retain_transcript_history(
         history: &mut VecDeque<TranscriptStreamEvent>,
         event: TranscriptStreamEvent,
     ) {
-        history.push_back(event);
-        while history.len() > MAX_TRANSCRIPT_HISTORY {
-            history.pop_front();
-        }
+        Self::retain_with_limit(history, event, MAX_TRANSCRIPT_HISTORY);
     }
 
     pub fn record_transcript_event(&self, event: TranscriptStreamEvent) -> Result<(), String> {
@@ -283,6 +297,233 @@ impl SessionStateManager {
             .lock()
             .map_err(|err| format!("failed to read transcript history: {err}"))?;
         Ok(history.iter().cloned().collect())
+    }
+
+    fn record_publishing_update(&self, update: PublishingUpdate) -> Result<(), String> {
+        let mut history = self
+            .publishing_history
+            .lock()
+            .map_err(|err| format!("failed to record publishing update: {err}"))?;
+        Self::retain_with_limit(&mut history, update, MAX_COMPLETION_HISTORY);
+        Ok(())
+    }
+
+    pub fn emit_publishing_update(
+        &self,
+        app: &AppHandle,
+        update: PublishingUpdate,
+    ) -> Result<(), String> {
+        self.record_publishing_update(update.clone())?;
+        app.emit(LIFECYCLE_EVENT_CHANNEL, &update)
+            .map_err(|err| format!("failed to emit publishing update: {err}"))
+    }
+
+    pub fn publishing_history(&self) -> Result<Vec<PublishingUpdate>, String> {
+        let history = self
+            .publishing_history
+            .lock()
+            .map_err(|err| format!("failed to read publishing history: {err}"))?;
+        Ok(history.iter().cloned().collect())
+    }
+
+    fn record_insertion_result(&self, result: InsertionResult) -> Result<(), String> {
+        let mut history = self
+            .insertion_history
+            .lock()
+            .map_err(|err| format!("failed to record insertion result: {err}"))?;
+        Self::retain_with_limit(&mut history, result, MAX_COMPLETION_HISTORY);
+        Ok(())
+    }
+
+    pub fn emit_insertion_result(
+        &self,
+        app: &AppHandle,
+        result: InsertionResult,
+    ) -> Result<(), String> {
+        self.record_insertion_result(result.clone())?;
+        app.emit(PUBLISH_RESULT_CHANNEL, &result)
+            .map_err(|err| format!("failed to emit insertion result: {err}"))
+    }
+
+    pub fn insertion_history(&self) -> Result<Vec<InsertionResult>, String> {
+        let history = self
+            .insertion_history
+            .lock()
+            .map_err(|err| format!("failed to read insertion history: {err}"))?;
+        Ok(history.iter().cloned().collect())
+    }
+
+    fn record_publish_notice(&self, notice: PublishNotice) -> Result<(), String> {
+        let mut history = self
+            .notice_history
+            .lock()
+            .map_err(|err| format!("failed to record publish notice: {err}"))?;
+        Self::retain_with_limit(&mut history, notice, MAX_COMPLETION_HISTORY);
+        Ok(())
+    }
+
+    pub fn emit_publish_notice(
+        &self,
+        app: &AppHandle,
+        notice: PublishNotice,
+    ) -> Result<(), String> {
+        self.record_publish_notice(notice.clone())?;
+        app.emit(PUBLISH_NOTICE_CHANNEL, &notice)
+            .map_err(|err| format!("failed to emit publish notice: {err}"))
+    }
+
+    pub fn publish_notice_history(&self) -> Result<Vec<PublishNotice>, String> {
+        let history = self
+            .notice_history
+            .lock()
+            .map_err(|err| format!("failed to read publish notice history: {err}"))?;
+        Ok(history.iter().cloned().collect())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishStrategy {
+    DirectInsert,
+    ClipboardFallback,
+    NotifyOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FallbackStrategy {
+    ClipboardCopy,
+    NotifyOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishStatus {
+    Completed,
+    Deferred,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PublishNoticeLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishActionKind {
+    Insert,
+    Copy,
+    SaveDraft,
+    UndoPrompt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishingUpdate {
+    pub session_id: String,
+    pub attempt: u8,
+    pub strategy: PublishStrategy,
+    pub fallback: Option<FallbackStrategy>,
+    pub retrying: bool,
+    pub detail: Option<String>,
+    pub timestamp_ms: u128,
+}
+
+impl PublishingUpdate {
+    pub fn new(
+        session_id: impl Into<String>,
+        attempt: u8,
+        strategy: PublishStrategy,
+        fallback: Option<FallbackStrategy>,
+        retrying: bool,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            attempt,
+            strategy,
+            fallback,
+            retrying,
+            detail,
+            timestamp_ms: current_timestamp_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertionFailure {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertionResult {
+    pub session_id: String,
+    pub status: PublishStatus,
+    pub strategy: PublishStrategy,
+    pub attempts: u8,
+    pub fallback: Option<FallbackStrategy>,
+    pub failure: Option<InsertionFailure>,
+    pub undo_token: Option<String>,
+    pub timestamp_ms: u128,
+}
+
+impl InsertionResult {
+    pub fn new(
+        session_id: impl Into<String>,
+        status: PublishStatus,
+        strategy: PublishStrategy,
+        attempts: u8,
+        fallback: Option<FallbackStrategy>,
+        failure: Option<InsertionFailure>,
+        undo_token: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            status,
+            strategy,
+            attempts,
+            fallback,
+            failure,
+            undo_token,
+            timestamp_ms: current_timestamp_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishNotice {
+    pub session_id: String,
+    pub action: PublishActionKind,
+    pub level: PublishNoticeLevel,
+    pub message: String,
+    pub undo_token: Option<String>,
+    pub timestamp_ms: u128,
+}
+
+impl PublishNotice {
+    pub fn new(
+        session_id: impl Into<String>,
+        action: PublishActionKind,
+        level: PublishNoticeLevel,
+        message: impl Into<String>,
+        undo_token: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            action,
+            level,
+            message: message.into(),
+            undo_token,
+            timestamp_ms: current_timestamp_ms(),
+        }
     }
 }
 
@@ -334,5 +575,90 @@ mod tests {
         assert_eq!(event.frame_index, 7);
         assert_eq!(event.latency_ms, 15);
         assert!(!event.is_first);
+    }
+
+    #[test]
+    fn publishing_history_retains_latest_updates() {
+        let manager = SessionStateManager::new();
+
+        for idx in 0..(MAX_COMPLETION_HISTORY + 10) as u8 {
+            let update = PublishingUpdate::new(
+                "session",
+                idx,
+                PublishStrategy::DirectInsert,
+                Some(FallbackStrategy::ClipboardCopy),
+                idx % 2 == 0,
+                Some(format!("attempt #{idx}")),
+            );
+            manager
+                .record_publishing_update(update)
+                .expect("record publishing update");
+        }
+
+        let history = manager
+            .publishing_history()
+            .expect("read publishing history");
+        assert_eq!(history.len(), MAX_COMPLETION_HISTORY);
+        assert_eq!(history.first().unwrap().attempt as usize, 10);
+        assert!(history.last().unwrap().timestamp_ms > 0);
+    }
+
+    #[test]
+    fn insertion_history_retains_latest_results() {
+        let manager = SessionStateManager::new();
+
+        for idx in 0..(MAX_COMPLETION_HISTORY + 5) as u8 {
+            let result = InsertionResult::new(
+                "session",
+                PublishStatus::Failed,
+                PublishStrategy::DirectInsert,
+                idx,
+                Some(FallbackStrategy::NotifyOnly),
+                Some(InsertionFailure {
+                    code: Some("timeout".into()),
+                    message: format!("attempt {idx} timed out"),
+                }),
+                Some("undo".into()),
+            );
+            manager
+                .record_insertion_result(result)
+                .expect("record insertion result");
+        }
+
+        let history = manager.insertion_history().expect("read insertion history");
+        assert_eq!(history.len(), MAX_COMPLETION_HISTORY);
+        assert_eq!(history.first().unwrap().attempts as usize, 5);
+        assert!(history.iter().any(|entry| entry.failure.is_some()));
+    }
+
+    #[test]
+    fn publish_notice_history_retains_latest_entries() {
+        let manager = SessionStateManager::new();
+
+        for idx in 0..(MAX_COMPLETION_HISTORY + 3) as u8 {
+            let notice = PublishNotice::new(
+                "session",
+                PublishActionKind::Copy,
+                if idx % 2 == 0 {
+                    PublishNoticeLevel::Info
+                } else {
+                    PublishNoticeLevel::Warn
+                },
+                format!("notice {idx}"),
+                None,
+            );
+            manager
+                .record_publish_notice(notice)
+                .expect("record publish notice");
+        }
+
+        let history = manager
+            .publish_notice_history()
+            .expect("read publish notice history");
+        assert_eq!(history.len(), MAX_COMPLETION_HISTORY);
+        assert_eq!(history.first().unwrap().message, "notice 3");
+        assert!(history
+            .iter()
+            .any(|entry| entry.level == PublishNoticeLevel::Warn));
     }
 }
