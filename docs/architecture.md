@@ -101,7 +101,7 @@ graph TD
   4. **Engine Orchestrator**：根据用户策略与网络状态在本地、云端引擎之间动态切换；使用 gRPC/WebSocket 与云端保持低延迟连接，并同步性能探针结果给监控。
   5. **Formatting & Command Parser**：将语音指令解析为格式化操作（段落、项目符号、片段触发）；结合前景应用信息（Accessibility API / Windows UI Automation）进行语境调整。
   6. **Context Collector**：聚合当前前景应用、语言设置、剪贴板摘要、用户偏好，向片段引擎与 LLM 提供安全过滤后的上下文；对敏感应用（银行、密码管理器）启用黑名单保护。
-  7. **Persistence Layer**：通过 `SQLCipher` 加密 SQLite 存储历史、词典、片段库；启用 FTS5 全文索引与分区表满足 500+ 条记录搜索；本地语音缓存采用加密文件夹并定期清理。
+7. **Persistence Layer**：长期目标是通过 `SQLCipher` 加密 SQLite 存储历史、词典、片段库，并启用 FTS5 全文索引与分区表满足 500+ 条记录搜索；本地语音缓存采用加密文件夹并定期清理。当前 UC2.3 里程碑中，桌面端通过异步 `PersistenceActor` 将片段草稿与通知中心记录保存在内存循环队列（默认 240 条）中，并暴露 `session_notice_center_history` 命令供 UI 重建发布历史；后续会在同一接口下替换为 SQLCipher 实现，确保无需修改前端契约。
   8. **Sync Agent**：与云端同步服务进行差量同步，支持离线队列、冲突解决与租户策略下载。
   9. **Session State Manager**：维护录音状态机（Idle → PreRoll → Recording → Processing → Publishing → Completed/Failed），监听音频管线、引擎编排与同步事件，通过内存消息总线（Tokio broadcast channel）向 Tauri 前端推送状态；触发提示音、托盘动画与无障碍文本播报，确保长按 Fn 后 400ms 内给出“准备中”反馈，并在处理/重试阶段持续提示用户工具正在工作。
 
@@ -122,7 +122,7 @@ graph TD
 6. **Logging & Observability**：`OpenTelemetry` + `Tempo`/`Jaeger` 采集链路，`Prometheus` 监控延迟、准确率；`OpenSearch` 存储审计与应用日志。
 
 ### 5.5 数据存储
-- **本地**：SQLCipher 加密 SQLite（历史、词典、片段库）；启用 `FTS5` + `bm25` 索引实现 500 条历史记录内毫秒级全文搜索；加密语音缓存目录（AES-256），定期清理；配置文件采用 TOML/JSON + HMAC 校验，并在 Secure Enclave/TPM 缓存密钥分片。
+- **本地**：规划目标为 SQLCipher 加密 SQLite（历史、词典、片段库），启用 `FTS5` + `bm25` 索引实现 500 条历史记录内毫秒级全文搜索；加密语音缓存目录（AES-256），定期清理；配置文件采用 TOML/JSON + HMAC 校验，并在 Secure Enclave/TPM 缓存密钥分片。当前实现阶段，片段草稿与发布通知由 `PersistenceActor` 保存在内存循环队列中（默认上限 240 条），后续会在不改变 API 的前提下迁移至 SQLCipher。
 - **云端元数据**：PostgreSQL 多租户架构，采用 `tenant_id` 分区；敏感字段使用 `pgcrypto` 或应用层加密。
 - **对象存储**：加密的临时语音片段、日志附件存储于 S3 兼容存储，生命周期策略 7 天自动清除。
 - **密钥管理**：利用云 KMS（Azure Key Vault/AWS KMS）管理租户主密钥，本地通过 Secure Enclave/DPAPI 加密密钥缓存；企业模式提供密钥轮换 API、自动化审计记录与租户自带密钥（BYOK）接入流程。
@@ -241,7 +241,7 @@ sequenceDiagram
 6. **离线审计补采**：桌面端在离线模式缓存关键操作摘要（加密封装），恢复联网后自动上传并标记时间差，满足企业审计要求。
 
 ## 10. 可观测性与故障恢复
-- **指标**：热键响应时间（P95 < 80ms）、音频管线延迟（P95 < 400ms）、本地/云端 ASR 准确率、润色延迟、同步成功率、崩溃次数、网络 RTT/丢包率、噪声阈值变化趋势。
+- **指标**：热键响应时间（P95 < 80ms）、音频管线延迟（P95 < 400ms）、本地/云端 ASR 准确率、润色延迟、同步成功率、崩溃次数、网络 RTT/丢包率、噪声阈值变化趋势；桌面发布链路通过 `session_publish_outcome` 记录插入成功率，`session_publish_degradation` 统计自动降级触发占比，`session_publish_failure` 捕获失败详情，撤销行为预留 `session_publish_undo` 事件，便于后续在仪表盘中分组展示。
 - **日志**：分级采集（调试、本地诊断、云端审计），用户可一键导出并匿名化处理；日志上传前进行脱敏（正则/ML 匹配个人数据）。
 - **追踪**：ASR/LLM 请求链路通过 OpenTelemetry Trace 关联，支持跨组件排查；桌面端通过批量上传 span，保障隐私。
 - **异常自动处理**：网络中断自动回退至本地模式；引擎失败触发熔断并通知用户；Fn 键捕获失败触发重新绑定流程；噪声突增触发强降噪建议；崩溃后通过守护进程重启服务并恢复热键绑定。

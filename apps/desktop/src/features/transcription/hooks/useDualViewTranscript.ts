@@ -3,10 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 const TRANSCRIPT_EVENT_CHANNEL = "session://transcript";
+const LIFECYCLE_EVENT_CHANNEL = "session://lifecycle";
+const PUBLISH_RESULT_CHANNEL = "session://publish-result";
+const PUBLISH_NOTICE_CHANNEL = "session://publish-notice";
 const TRANSCRIPT_LOG_COMMAND = "session_transcript_log";
 const APPLY_SELECTION_COMMAND = "session_transcript_apply_selection";
+const PUBLISH_HISTORY_COMMAND = "session_publish_history";
+const PUBLISH_RESULTS_COMMAND = "session_publish_results";
+const NOTICE_CENTER_COMMAND = "session_notice_center_history";
 const MAX_NOTICE_HISTORY = 50;
 const MAX_ANNOUNCEMENT_HISTORY = 25;
+const MAX_PUBLISH_HISTORY = 120;
+const MAX_PUBLISH_NOTICE_HISTORY = 80;
 export const MAX_MULTI_SELECT = 5;
 
 type AnnouncementPoliteness = "polite" | "assertive";
@@ -23,6 +31,58 @@ type TranscriptSentence = {
   source: TranscriptStreamSource;
   isPrimary: boolean;
   withinSla: boolean;
+};
+
+export type PublishStrategy =
+  | "directInsert"
+  | "clipboardFallback"
+  | "notifyOnly";
+
+export type FallbackStrategy = "clipboardCopy" | "notifyOnly";
+
+export type PublishStatus = "completed" | "deferred" | "failed";
+
+export type PublishNoticeLevel = "info" | "warn" | "error";
+
+export type PublishActionKind =
+  | "insert"
+  | "copy"
+  | "saveDraft"
+  | "undoPrompt";
+
+export type PublishingUpdate = {
+  sessionId: string;
+  attempt: number;
+  strategy: PublishStrategy;
+  fallback: FallbackStrategy | null;
+  retrying: boolean;
+  detail: string | null;
+  timestampMs: number;
+};
+
+export type InsertionFailure = {
+  code: string | null;
+  message: string;
+};
+
+export type InsertionResult = {
+  sessionId: string;
+  status: PublishStatus;
+  strategy: PublishStrategy;
+  attempts: number;
+  fallback: FallbackStrategy | null;
+  failure: InsertionFailure | null;
+  undoToken: string | null;
+  timestampMs: number;
+};
+
+export type PublishNotice = {
+  sessionId: string;
+  action: PublishActionKind;
+  level: PublishNoticeLevel;
+  message: string;
+  undoToken: string | null;
+  timestampMs: number;
 };
 
 type TranscriptSentenceSelection = {
@@ -97,6 +157,9 @@ export type DualViewTranscriptState = {
   error: string | null;
   focusedSentenceId: number | null;
   announcements: DualViewAnnouncement[];
+  publishUpdates: PublishingUpdate[];
+  publishResults: InsertionResult[];
+  publishNotices: PublishNotice[];
   toggleSelection: (sentenceId: number) => void;
   selectSentences: (sentenceIds: number[]) => void;
   clearSelections: () => void;
@@ -133,11 +196,23 @@ type InternalState = {
   error: string | null;
   focusedSentenceId: number | null;
   announcements: DualViewAnnouncement[];
+  publishUpdates: PublishingUpdate[];
+  publishResults: InsertionResult[];
+  publishNotices: PublishNotice[];
 };
 
 type Action =
   | { type: "hydrate"; events: TranscriptStreamEvent[] }
   | { type: "event"; event: TranscriptStreamEvent }
+  | {
+      type: "hydratePublishing";
+      updates: PublishingUpdate[];
+      results: InsertionResult[];
+      notices: PublishNotice[];
+    }
+  | { type: "publishingUpdate"; update: PublishingUpdate }
+  | { type: "publishResult"; result: InsertionResult }
+  | { type: "publishNotice"; notice: PublishNotice }
   | { type: "toggleSelection"; sentenceId: number }
   | { type: "selectSentences"; sentenceIds: number[] }
   | { type: "clearSelections" }
@@ -166,6 +241,9 @@ const initialState: InternalState = {
   error: null,
   focusedSentenceId: null,
   announcements: [],
+  publishUpdates: [],
+  publishResults: [],
+  publishNotices: [],
 };
 
 let announcementCounter = 0;
@@ -468,6 +546,9 @@ const reduceWithEvent = (
     error: baseState.error,
     focusedSentenceId,
     announcements,
+    publishUpdates: baseState.publishUpdates,
+    publishResults: baseState.publishResults,
+    publishNotices: baseState.publishNotices,
   };
 };
 
@@ -488,6 +569,47 @@ const reducer = (state: InternalState, action: Action): InternalState => {
       return {
         ...nextState,
         isHydrated: true,
+      };
+    }
+    case "hydratePublishing": {
+      const updates = action.updates.slice(-MAX_PUBLISH_HISTORY);
+      const results = action.results.slice(-MAX_PUBLISH_HISTORY);
+      const notices = action.notices.slice(-MAX_PUBLISH_NOTICE_HISTORY);
+      return {
+        ...state,
+        publishUpdates: updates,
+        publishResults: results,
+        publishNotices: notices,
+      };
+    }
+    case "publishingUpdate": {
+      const updates = [...state.publishUpdates, action.update];
+      if (updates.length > MAX_PUBLISH_HISTORY) {
+        updates.splice(0, updates.length - MAX_PUBLISH_HISTORY);
+      }
+      return {
+        ...state,
+        publishUpdates: updates,
+      };
+    }
+    case "publishResult": {
+      const results = [...state.publishResults, action.result];
+      if (results.length > MAX_PUBLISH_HISTORY) {
+        results.splice(0, results.length - MAX_PUBLISH_HISTORY);
+      }
+      return {
+        ...state,
+        publishResults: results,
+      };
+    }
+    case "publishNotice": {
+      const notices = [...state.publishNotices, action.notice];
+      if (notices.length > MAX_PUBLISH_NOTICE_HISTORY) {
+        notices.splice(0, notices.length - MAX_PUBLISH_NOTICE_HISTORY);
+      }
+      return {
+        ...state,
+        publishNotices: notices,
       };
     }
     case "toggleSelection": {
@@ -745,15 +867,32 @@ export const useDualViewTranscript = (): DualViewTranscriptState => {
     }
 
     let active = true;
-    let unlisten: UnlistenFn | null = null;
+    const unlisteners: UnlistenFn[] = [];
 
     (async () => {
       try {
-        const history = await invoke<TranscriptStreamEvent[]>(
-          TRANSCRIPT_LOG_COMMAND,
-        );
-        if (active && Array.isArray(history)) {
-          dispatch({ type: "hydrate", events: history });
+        const [
+          transcriptHistory,
+          publishHistory,
+          publishResults,
+          publishNotices,
+        ] = await Promise.all([
+          invoke<TranscriptStreamEvent[]>(TRANSCRIPT_LOG_COMMAND),
+          invoke<PublishingUpdate[]>(PUBLISH_HISTORY_COMMAND),
+          invoke<InsertionResult[]>(PUBLISH_RESULTS_COMMAND),
+          invoke<PublishNotice[]>(NOTICE_CENTER_COMMAND),
+        ]);
+
+        if (active) {
+          if (Array.isArray(transcriptHistory)) {
+            dispatch({ type: "hydrate", events: transcriptHistory });
+          }
+          dispatch({
+            type: "hydratePublishing",
+            updates: Array.isArray(publishHistory) ? publishHistory : [],
+            results: Array.isArray(publishResults) ? publishResults : [],
+            notices: Array.isArray(publishNotices) ? publishNotices : [],
+          });
         }
       } catch (error) {
         if (active) {
@@ -761,25 +900,64 @@ export const useDualViewTranscript = (): DualViewTranscriptState => {
         }
       }
 
-      try {
-        unlisten = await listen<TranscriptStreamEvent>(
-          TRANSCRIPT_EVENT_CHANNEL,
-          (event) => {
-            dispatch({ type: "event", event: event.payload });
-          },
-        );
-      } catch (error) {
-        if (active) {
-          dispatch({ type: "setError", error: String(error) });
+      const registerListener = async <T,>(
+        channel: string,
+        handler: (payload: T) => void,
+      ) => {
+        try {
+          const stop = await listen<T>(channel, (event) => {
+            handler(event.payload);
+          });
+          if (active) {
+            unlisteners.push(stop);
+          } else {
+            stop();
+          }
+        } catch (error) {
+          if (active) {
+            dispatch({ type: "setError", error: String(error) });
+          }
         }
-      }
+      };
+
+      await registerListener<TranscriptStreamEvent>(
+        TRANSCRIPT_EVENT_CHANNEL,
+        (event) => {
+          dispatch({ type: "event", event });
+        },
+      );
+
+      await registerListener<PublishingUpdate>(
+        LIFECYCLE_EVENT_CHANNEL,
+        (update) => {
+          dispatch({ type: "publishingUpdate", update });
+        },
+      );
+
+      await registerListener<InsertionResult>(
+        PUBLISH_RESULT_CHANNEL,
+        (result) => {
+          dispatch({ type: "publishResult", result });
+        },
+      );
+
+      await registerListener<PublishNotice>(
+        PUBLISH_NOTICE_CHANNEL,
+        (notice) => {
+          dispatch({ type: "publishNotice", notice });
+        },
+      );
     })();
 
     return () => {
       active = false;
-      if (unlisten) {
-        unlisten();
-      }
+      unlisteners.splice(0).forEach((stop) => {
+        try {
+          stop();
+        } catch (error) {
+          console.warn("Failed to cleanup listener", error);
+        }
+      });
     };
   }, []);
 
@@ -886,6 +1064,9 @@ export const useDualViewTranscript = (): DualViewTranscriptState => {
     error: state.error,
     focusedSentenceId: state.focusedSentenceId,
     announcements,
+    publishUpdates: state.publishUpdates,
+    publishResults: state.publishResults,
+    publishNotices: state.publishNotices,
     toggleSelection,
     selectSentences,
     clearSelections,

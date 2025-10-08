@@ -6,6 +6,15 @@ pub(crate) const TARGET: &str = "telemetry::dual_view";
 pub(crate) const EVENT_LATENCY: &str = "dual_view_latency";
 pub(crate) const EVENT_REVERT: &str = "dual_view_revert";
 
+pub(crate) const SESSION_TARGET: &str = "telemetry::session";
+pub(crate) const EVENT_PUBLISH_ATTEMPT: &str = "session_publish_attempt";
+pub(crate) const EVENT_PUBLISH_OUTCOME: &str = "session_publish_outcome";
+pub(crate) const EVENT_PUBLISH_FAILURE: &str = "session_publish_failure";
+pub(crate) const EVENT_PUBLISH_DEGRADATION: &str = "session_publish_degradation";
+pub(crate) const EVENT_DRAFT_SAVE_SUCCESS: &str = "session_draft_save_success";
+pub(crate) const EVENT_DRAFT_SAVE_FAILURE: &str = "session_draft_save_failure";
+pub(crate) const EVENT_PUBLISH_UNDO: &str = "session_publish_undo";
+
 #[derive(Debug, Serialize)]
 pub struct DualViewLatencyEvent {
     pub sentence_id: u64,
@@ -26,6 +35,58 @@ pub struct DualViewSelectionLog {
 pub struct DualViewRevertEvent {
     pub requested: Vec<DualViewSelectionLog>,
     pub applied: Vec<DualViewSelectionLog>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPublishAttemptEvent<'a> {
+    pub session_id: &'a str,
+    pub app_identifier: Option<&'a str>,
+    pub window_title: Option<&'a str>,
+    pub fallback: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPublishOutcomeEvent<'a> {
+    pub session_id: &'a str,
+    pub status: &'a str,
+    pub strategy: &'a str,
+    pub attempts: u8,
+    pub fallback: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPublishFailureEvent<'a> {
+    pub session_id: &'a str,
+    pub error: &'a str,
+    pub attempts: u8,
+    pub fallback: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPublishDegradationEvent<'a> {
+    pub session_id: &'a str,
+    pub fallback: &'a str,
+    pub outcome: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionDraftSaveEvent<'a> {
+    pub session_id: &'a str,
+    pub draft_id: &'a str,
+    pub tags: Vec<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionDraftSaveFailureEvent<'a> {
+    pub session_id: &'a str,
+    pub error: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionPublishUndoEvent<'a> {
+    pub session_id: &'a str,
+    pub undo_token: Option<&'a str>,
+    pub origin: &'a str,
 }
 
 pub fn record_dual_view_latency(
@@ -87,6 +148,203 @@ pub fn record_dual_view_revert(
             event = EVENT_REVERT,
             %err,
             "failed to encode dual view revert event"
+        ),
+    }
+}
+
+pub fn record_session_publish_attempt(
+    session_id: &str,
+    app_identifier: Option<&str>,
+    window_title: Option<&str>,
+    fallback: &str,
+) {
+    let event = SessionPublishAttemptEvent {
+        session_id,
+        app_identifier,
+        window_title,
+        fallback,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_ATTEMPT,
+            session_id,
+            app_identifier,
+            window_title,
+            fallback,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_ATTEMPT,
+            %err,
+            "failed to encode session publish attempt"
+        ),
+    }
+}
+
+pub fn record_session_publish_outcome(
+    session_id: &str,
+    status: &str,
+    strategy: &str,
+    attempts: u8,
+    fallback: Option<&str>,
+) {
+    let event = SessionPublishOutcomeEvent {
+        session_id,
+        status,
+        strategy,
+        attempts,
+        fallback,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_OUTCOME,
+            session_id,
+            status,
+            strategy,
+            attempts,
+            fallback,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_OUTCOME,
+            %err,
+            "failed to encode session publish outcome"
+        ),
+    }
+}
+
+pub fn record_session_publish_failure(
+    session_id: &str,
+    error: String,
+    attempts: u8,
+    fallback: Option<&str>,
+) {
+    let event = SessionPublishFailureEvent {
+        session_id,
+        error: &error,
+        attempts,
+        fallback,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_FAILURE,
+            session_id,
+            attempts,
+            fallback,
+            error = %error,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_FAILURE,
+            %err,
+            "failed to encode session publish failure"
+        ),
+    }
+}
+
+pub fn record_session_publish_degradation(session_id: &str, fallback: &str, outcome: &str) {
+    let event = SessionPublishDegradationEvent {
+        session_id,
+        fallback,
+        outcome,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_DEGRADATION,
+            session_id,
+            fallback,
+            outcome,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_DEGRADATION,
+            %err,
+            "failed to encode publish degradation event"
+        ),
+    }
+}
+
+pub fn record_session_draft_saved(session_id: &str, draft_id: &str, tags: &[String]) {
+    let tag_refs: Vec<&str> = tags.iter().map(|tag| tag.as_str()).collect();
+    let event = SessionDraftSaveEvent {
+        session_id,
+        draft_id,
+        tags: tag_refs,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_DRAFT_SAVE_SUCCESS,
+            session_id,
+            draft_id,
+            tag_count = event.tags.len(),
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_DRAFT_SAVE_SUCCESS,
+            %err,
+            "failed to encode draft save event"
+        ),
+    }
+}
+
+pub fn record_session_draft_failed(session_id: &str, error: String) {
+    let event = SessionDraftSaveFailureEvent {
+        session_id,
+        error: &error,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_DRAFT_SAVE_FAILURE,
+            session_id,
+            error = %error,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_DRAFT_SAVE_FAILURE,
+            %err,
+            "failed to encode draft save failure"
+        ),
+    }
+}
+
+pub fn record_session_publish_undo(session_id: &str, undo_token: Option<&str>, origin: &str) {
+    let event = SessionPublishUndoEvent {
+        session_id,
+        undo_token,
+        origin,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_UNDO,
+            session_id,
+            origin,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_PUBLISH_UNDO,
+            %err,
+            "failed to encode publish undo event"
         ),
     }
 }

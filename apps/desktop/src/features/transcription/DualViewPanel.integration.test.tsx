@@ -31,7 +31,43 @@ type TranscriptStreamEvent = {
       };
 };
 
-type Listener = (event: { payload: TranscriptStreamEvent }) => void;
+type PublishStrategy = "directInsert" | "clipboardFallback" | "notifyOnly";
+
+type FallbackStrategy = "clipboardCopy" | "notifyOnly" | null;
+
+type PublishStatus = "completed" | "deferred" | "failed";
+
+type PublishingUpdate = {
+  sessionId: string;
+  attempt: number;
+  strategy: PublishStrategy;
+  fallback: FallbackStrategy;
+  retrying: boolean;
+  detail: string | null;
+  timestampMs: number;
+};
+
+type InsertionResult = {
+  sessionId: string;
+  status: PublishStatus;
+  strategy: PublishStrategy;
+  attempts: number;
+  fallback: Exclude<FallbackStrategy, null> | null;
+  failure: { code: string | null; message: string } | null;
+  undoToken: string | null;
+  timestampMs: number;
+};
+
+type PublishNotice = {
+  sessionId: string;
+  action: "insert" | "copy" | "saveDraft" | "undoPrompt";
+  level: "info" | "warn" | "error";
+  message: string;
+  undoToken: string | null;
+  timestampMs: number;
+};
+
+type Listener = (event: { payload: unknown }) => void;
 
 const listeners: Record<string, Listener[]> = {};
 
@@ -57,8 +93,11 @@ const { invoke } = await import("@tauri-apps/api/core");
 const { listen } = await import("@tauri-apps/api/event");
 
 const TRANSCRIPT_EVENT_CHANNEL = "session://transcript";
+const LIFECYCLE_EVENT_CHANNEL = "session://lifecycle";
+const PUBLISH_RESULT_CHANNEL = "session://publish-result";
+const PUBLISH_NOTICE_CHANNEL = "session://publish-notice";
 
-const emit = (channel: string, payload: TranscriptStreamEvent) => {
+const emit = <T,>(channel: string, payload: T) => {
   (listeners[channel] || []).forEach((handler) => handler({ payload }));
 };
 
@@ -106,6 +145,13 @@ describe("DualViewPanel integration", () => {
     (invoke as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       async (command: string) => {
         if (command === "session_transcript_log") {
+          return [];
+        }
+        if (
+          command === "session_publish_history" ||
+          command === "session_publish_results" ||
+          command === "session_notice_center_history"
+        ) {
           return [];
         }
         return null;
@@ -190,6 +236,13 @@ describe("DualViewPanel integration", () => {
         }
         if (command === "session_transcript_apply_selection") {
           return args;
+        }
+        if (
+          command === "session_publish_history" ||
+          command === "session_publish_results" ||
+          command === "session_notice_center_history"
+        ) {
+          return [];
         }
         return null;
       },
@@ -305,6 +358,13 @@ describe("DualViewPanel integration", () => {
         if (command === "session_transcript_log") {
           return [];
         }
+        if (
+          command === "session_publish_history" ||
+          command === "session_publish_results" ||
+          command === "session_notice_center_history"
+        ) {
+          return [];
+        }
         return null;
       },
     );
@@ -368,5 +428,131 @@ describe("DualViewPanel integration", () => {
     await waitFor(() => {
       expect(rawItems[0]).toHaveFocus();
     });
+  });
+
+  it("surfaces publishing retries, failures, and notices", async () => {
+    (invoke as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (command: string) => {
+        switch (command) {
+          case "session_transcript_log":
+            return [];
+          case "session_publish_history": {
+            const history: PublishingUpdate[] = [
+              {
+                sessionId: "session-x",
+                attempt: 1,
+                strategy: "directInsert",
+                fallback: null,
+                retrying: false,
+                detail: "Initial insert",
+                timestampMs: 1,
+              },
+            ];
+            return history;
+          }
+          case "session_publish_results":
+            return [] as InsertionResult[];
+          case "session_notice_center_history":
+            return [] as PublishNotice[];
+          default:
+            return null;
+        }
+      },
+    );
+
+    render(<Harness />);
+
+    await waitFor(() => {
+      expect(listen).toHaveBeenCalledWith(
+        LIFECYCLE_EVENT_CHANNEL,
+        expect.any(Function),
+      );
+      expect(listen).toHaveBeenCalledWith(
+        PUBLISH_RESULT_CHANNEL,
+        expect.any(Function),
+      );
+      expect(listen).toHaveBeenCalledWith(
+        PUBLISH_NOTICE_CHANNEL,
+        expect.any(Function),
+      );
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Publishing polished transcript…/i),
+      ).toBeInTheDocument();
+    });
+
+    const retryUpdate: PublishingUpdate = {
+      sessionId: "session-x",
+      attempt: 2,
+      strategy: "clipboardFallback",
+      fallback: "clipboardCopy",
+      retrying: true,
+      detail: "Retry clipboard fallback",
+      timestampMs: 2,
+    };
+
+    await act(async () => {
+      emit(LIFECYCLE_EVENT_CHANNEL, retryUpdate);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Retrying…/i)).toBeInTheDocument();
+    });
+
+    const failureResult: InsertionResult = {
+      sessionId: "session-x",
+      status: "failed",
+      strategy: "clipboardFallback",
+      attempts: 2,
+      fallback: "clipboardCopy",
+      failure: { code: "focus-lost", message: "Target window lost focus" },
+      undoToken: "undo-x",
+      timestampMs: 3,
+    };
+
+    await act(async () => {
+      emit(PUBLISH_RESULT_CHANNEL, failureResult);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Automatic insertion failed after 2 attempt/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Copied the transcript to your clipboard as a fallback/i),
+      ).toBeInTheDocument();
+    });
+
+    const undoNotice: PublishNotice = {
+      sessionId: "session-x",
+      action: "undoPrompt",
+      level: "warn",
+      message: "Press Ctrl+Z to undo",
+      undoToken: "undo-x",
+      timestampMs: 4,
+    };
+
+    await act(async () => {
+      emit(PUBLISH_NOTICE_CHANNEL, undoNotice);
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Undo is available via Ctrl\/Cmd\+Z or from the clipboard backup/i),
+      ).toBeInTheDocument();
+      expect(screen.getAllByText(/Press Ctrl\+Z to undo/i).length).toBeGreaterThan(0);
+    });
+
+    const historyToggle = screen.getByRole("button", { name: /show history/i });
+    fireEvent.click(historyToggle);
+
+    const attemptsList = await screen.findByText(/Publishing attempts/i);
+    expect(attemptsList).toBeInTheDocument();
+    expect(screen.getByText(/Attempt 2/i)).toBeInTheDocument();
+    expect(screen.getByText(/Detail: Retry clipboard fallback/i)).toBeInTheDocument();
+    expect(screen.getByText(/Recent notices/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Press Ctrl\+Z to undo/i).length).toBeGreaterThan(0);
   });
 });
