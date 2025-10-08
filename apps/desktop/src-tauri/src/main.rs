@@ -6,6 +6,7 @@ use std::{path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager, State};
 
 mod audio;
+mod history;
 mod hotkey;
 mod native_probe;
 mod session;
@@ -17,6 +18,9 @@ use audio::{
     request_accessibility_permission as request_system_accessibility_permission,
     request_microphone_permission as request_system_microphone_permission, run_device_check,
     DeviceTestReport, FrameWindowSetting,
+};
+use flowwisper_core::session::history::{
+    AccuracyUpdate, HistoryEntry, HistoryPage, HistoryPostAction, HistoryQuery,
 };
 use hotkey::{
     load_hotkey_config, load_or_create_hmac_key, AppState, FnProbeResult, HotkeyBinding,
@@ -213,6 +217,28 @@ fn session_publish_notices(state: State<AppState>) -> Result<Vec<PublishNotice>,
 #[tauri::command]
 fn session_notice_center_history(state: State<AppState>) -> Result<Vec<PublishNotice>, String> {
     state.session.publish_notice_history()
+}
+
+#[tauri::command]
+async fn session_history_search(query: HistoryQuery) -> Result<HistoryPage, String> {
+    history::search_history(query).await
+}
+
+#[tauri::command]
+async fn session_history_entry(session_id: String) -> Result<Option<HistoryEntry>, String> {
+    history::load_history(session_id).await
+}
+
+#[tauri::command]
+async fn session_history_mark_accuracy(update: AccuracyUpdate) -> Result<(), String> {
+    history::mark_accuracy(update).await
+}
+
+#[tauri::command]
+async fn session_history_append_action(
+    request: history::HistoryActionRequest,
+) -> Result<Vec<HistoryPostAction>, String> {
+    history::append_action(request.session_id, request.action, request.detail).await
 }
 
 #[tauri::command]
@@ -1058,6 +1084,10 @@ fn main() {
             session_publish_results,
             session_publish_notices,
             session_notice_center_history,
+            session_history_search,
+            session_history_entry,
+            session_history_mark_accuracy,
+            session_history_append_action,
             session_transcript_apply_selection,
             prime_session_preroll,
             mark_session_processing,

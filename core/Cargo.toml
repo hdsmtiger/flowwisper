@@ -5,6 +5,7 @@ edition = "2021"
 description = "Flowwisper Core Service - 守护进程脚手架"
 license = "MIT"
 authors = ["Flowwisper Team"]
+build = "build.rs"
 
 [dependencies]
 anyhow = "1"
@@ -17,12 +18,27 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
+dirs = "5"
 whisper-rs = { version = "0.11", optional = true }
 
+[dependencies.r2d2]
+version = "0.8"
+optional = true
+
+[dependencies.r2d2_sqlite]
+version = "0.21"
+optional = true
+
+[dependencies.rusqlite]
+version = "0.28"
+features = ["bundled-sqlcipher", "unlock_notify", "chrono", "array"]
+optional = true
+
 [features]
-default = ["local-asr"]
+default = ["local-asr", "sqlcipher-persistence"]
 local-asr = ["whisper-rs"]
 cloud-asr = []
+sqlcipher-persistence = ["rusqlite", "r2d2", "r2d2_sqlite"]
 whisper-rs = ["dep:whisper-rs"]
 
 [dev-dependencies]
