@@ -4,7 +4,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags};
 use tempfile::NamedTempFile;
 
-use super::sqlite::{KeyResolver, SqliteConfig, SqlitePath, SqlitePersistence};
+use super::sqlite::{KeyResolver, SqliteConfig, SqlitePath, SqlitePersistence, MAX_TELEMETRY_QUEUE};
 use crate::session::history::{
     AccuracyFlag, AccuracyUpdate, HistoryActionKind, HistoryPostAction, HistoryQuery,
     SessionSnapshot,
@@ -207,6 +207,31 @@ fn enqueue_telemetry_records_event() {
         .query_row("SELECT count(*) FROM telemetry_queue", [], |row| row.get(0))
         .expect("query");
     assert_eq!(count, 1);
+}
+
+#[test]
+fn telemetry_queue_prunes_to_capacity() {
+    let config = SqliteConfig::memory();
+    let persistence = SqlitePersistence::bootstrap(config).expect("bootstrap should succeed");
+
+    for idx in 0..(MAX_TELEMETRY_QUEUE + 75) {
+        persistence
+            .enqueue_telemetry(
+                "session-prune",
+                "noise_event",
+                json!({"seq": idx}),
+            )
+            .expect("enqueue telemetry");
+    }
+
+    let count: i64 = persistence
+        .connection()
+        .expect("conn")
+        .query_row("SELECT count(*) FROM telemetry_queue", [], |row| row.get(0))
+        .expect("query count");
+
+    assert!(count <= MAX_TELEMETRY_QUEUE);
+    assert!(count >= 100, "queue should retain at least 100 events");
 }
 
 #[test]

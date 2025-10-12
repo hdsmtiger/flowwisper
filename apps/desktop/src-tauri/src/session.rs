@@ -1,3 +1,10 @@
+use flowwisper_core::session::{
+    AutoStopReason as CoreAutoStopReason, SessionEvent as CoreSessionEvent,
+    SessionNoiseWarning as CoreSessionNoiseWarning,
+    SessionSilenceCountdown as CoreSessionSilenceCountdown,
+    SilenceCancellationReason as CoreSilenceCancellationReason,
+    SilenceCountdownState as CoreSilenceCountdownState,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -8,8 +15,10 @@ const TRANSCRIPT_EVENT_CHANNEL: &str = "session://transcript";
 const LIFECYCLE_EVENT_CHANNEL: &str = "session://lifecycle";
 const PUBLISH_RESULT_CHANNEL: &str = "session://publish-result";
 const PUBLISH_NOTICE_CHANNEL: &str = "session://publish-notice";
+const SESSION_EVENT_CHANNEL: &str = "session://event";
 const MAX_TRANSCRIPT_HISTORY: usize = 120;
 const MAX_COMPLETION_HISTORY: usize = 120;
+const MAX_SESSION_EVENT_HISTORY: usize = 120;
 
 fn current_timestamp_ms() -> u128 {
     SystemTime::now()
@@ -52,6 +61,7 @@ pub struct SessionStateManager {
     publishing_history: Arc<Mutex<VecDeque<PublishingUpdate>>>,
     insertion_history: Arc<Mutex<VecDeque<InsertionResult>>>,
     notice_history: Arc<Mutex<VecDeque<PublishNotice>>>,
+    event_history: Arc<Mutex<VecDeque<SessionRealtimeEvent>>>,
 }
 
 impl SessionStateManager {
@@ -63,6 +73,7 @@ impl SessionStateManager {
             publishing_history: Arc::new(Mutex::new(VecDeque::new())),
             insertion_history: Arc::new(Mutex::new(VecDeque::new())),
             notice_history: Arc::new(Mutex::new(VecDeque::new())),
+            event_history: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -254,6 +265,13 @@ impl SessionStateManager {
         Self::retain_with_limit(history, event, MAX_TRANSCRIPT_HISTORY);
     }
 
+    fn retain_session_events(
+        history: &mut VecDeque<SessionRealtimeEvent>,
+        event: SessionRealtimeEvent,
+    ) {
+        Self::retain_with_limit(history, event, MAX_SESSION_EVENT_HISTORY);
+    }
+
     pub fn record_transcript_event(&self, event: TranscriptStreamEvent) -> Result<(), String> {
         let mut history = self
             .transcript_history
@@ -296,6 +314,43 @@ impl SessionStateManager {
             .transcript_history
             .lock()
             .map_err(|err| format!("failed to read transcript history: {err}"))?;
+        Ok(history.iter().cloned().collect())
+    }
+
+    pub fn record_session_event(&self, event: SessionRealtimeEvent) -> Result<(), String> {
+        let mut history = self
+            .event_history
+            .lock()
+            .map_err(|err| format!("failed to record session event: {err}"))?;
+        Self::retain_session_events(&mut history, event);
+        Ok(())
+    }
+
+    pub fn emit_session_event(
+        &self,
+        app: &AppHandle,
+        event: SessionRealtimeEvent,
+    ) -> Result<(), String> {
+        event.validate()?;
+        self.record_session_event(event.clone())?;
+        app.emit(SESSION_EVENT_CHANNEL, &event)
+            .map_err(|err| format!("failed to emit session event: {err}"))
+    }
+
+    pub fn emit_core_session_event(
+        &self,
+        app: &AppHandle,
+        event: CoreSessionEvent,
+    ) -> Result<(), String> {
+        let transformed = SessionRealtimeEvent::from_core_event(event);
+        self.emit_session_event(app, transformed)
+    }
+
+    pub fn session_event_history(&self) -> Result<Vec<SessionRealtimeEvent>, String> {
+        let history = self
+            .event_history
+            .lock()
+            .map_err(|err| format!("failed to read session event history: {err}"))?;
         Ok(history.iter().cloned().collect())
     }
 
@@ -378,6 +433,157 @@ impl SessionStateManager {
             .lock()
             .map_err(|err| format!("failed to read publish notice history: {err}"))?;
         Ok(history.iter().cloned().collect())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionSilenceCountdownState {
+    Started,
+    Tick,
+    Canceled,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionSilenceCancellationReason {
+    SpeechDetected,
+    ManualStop,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionAutoStopReason {
+    SilenceTimeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SessionRealtimeEvent {
+    NoiseWarning {
+        timestamp_ms: u128,
+        baseline_db: f32,
+        threshold_db: f32,
+        level_db: f32,
+        persistence_ms: u32,
+    },
+    SilenceCountdown {
+        timestamp_ms: u128,
+        total_ms: u32,
+        remaining_ms: u32,
+        state: SessionSilenceCountdownState,
+        cancel_reason: Option<SessionSilenceCancellationReason>,
+    },
+    AutoStop {
+        timestamp_ms: u128,
+        reason: SessionAutoStopReason,
+    },
+}
+
+impl SessionRealtimeEvent {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            SessionRealtimeEvent::NoiseWarning {
+                baseline_db,
+                threshold_db,
+                level_db,
+                persistence_ms,
+                ..
+            } => {
+                if !baseline_db.is_finite() || !threshold_db.is_finite() || !level_db.is_finite() {
+                    return Err("noise warning event contains non-finite levels".into());
+                }
+                if *persistence_ms == 0 {
+                    return Err("noise warning persistence must be positive".into());
+                }
+            }
+            SessionRealtimeEvent::SilenceCountdown {
+                total_ms,
+                remaining_ms,
+                state,
+                cancel_reason,
+                ..
+            } => {
+                if *total_ms == 0 {
+                    return Err("silence countdown total must be positive".into());
+                }
+                if remaining_ms > total_ms {
+                    return Err("silence countdown remaining exceeds total".into());
+                }
+                if matches!(state, SessionSilenceCountdownState::Completed) && *remaining_ms != 0 {
+                    return Err("completed silence countdown must report 0 remaining".into());
+                }
+                if matches!(state, SessionSilenceCountdownState::Canceled) {
+                    if cancel_reason.is_none() {
+                        return Err("canceled silence countdown must include a reason".into());
+                    }
+                } else if cancel_reason.is_some() {
+                    return Err(
+                        "silence countdown cancel reason only allowed when state is canceled"
+                            .into(),
+                    );
+                }
+            }
+            SessionRealtimeEvent::AutoStop { .. } => {}
+        }
+
+        Ok(())
+    }
+
+    fn from_core_event(event: CoreSessionEvent) -> Self {
+        match event {
+            CoreSessionEvent::NoiseWarning(payload) => SessionRealtimeEvent::NoiseWarning {
+                timestamp_ms: current_timestamp_ms(),
+                baseline_db: payload.baseline_db,
+                threshold_db: payload.threshold_db,
+                level_db: payload.level_db,
+                persistence_ms: payload.persistence_ms,
+            },
+            CoreSessionEvent::SilenceCountdown(payload) => SessionRealtimeEvent::SilenceCountdown {
+                timestamp_ms: current_timestamp_ms(),
+                total_ms: payload.total_ms,
+                remaining_ms: payload.remaining_ms,
+                state: payload.state.into(),
+                cancel_reason: payload.cancel_reason.map(Into::into),
+            },
+            CoreSessionEvent::AutoStop(payload) => SessionRealtimeEvent::AutoStop {
+                timestamp_ms: current_timestamp_ms(),
+                reason: payload.reason.into(),
+            },
+        }
+    }
+}
+
+impl From<CoreSilenceCountdownState> for SessionSilenceCountdownState {
+    fn from(value: CoreSilenceCountdownState) -> Self {
+        match value {
+            CoreSilenceCountdownState::Started => SessionSilenceCountdownState::Started,
+            CoreSilenceCountdownState::Tick => SessionSilenceCountdownState::Tick,
+            CoreSilenceCountdownState::Canceled => SessionSilenceCountdownState::Canceled,
+            CoreSilenceCountdownState::Completed => SessionSilenceCountdownState::Completed,
+        }
+    }
+}
+
+impl From<CoreSilenceCancellationReason> for SessionSilenceCancellationReason {
+    fn from(value: CoreSilenceCancellationReason) -> Self {
+        match value {
+            CoreSilenceCancellationReason::SpeechDetected => {
+                SessionSilenceCancellationReason::SpeechDetected
+            }
+            CoreSilenceCancellationReason::ManualStop => {
+                SessionSilenceCancellationReason::ManualStop
+            }
+        }
+    }
+}
+
+impl From<CoreAutoStopReason> for SessionAutoStopReason {
+    fn from(value: CoreAutoStopReason) -> Self {
+        match value {
+            CoreAutoStopReason::SilenceTimeout => SessionAutoStopReason::SilenceTimeout,
+        }
     }
 }
 
@@ -660,5 +866,113 @@ mod tests {
         assert!(history
             .iter()
             .any(|entry| entry.level == PublishNoticeLevel::Warn));
+    }
+
+    #[test]
+    fn session_event_history_retains_latest_entries() {
+        let manager = SessionStateManager::new();
+
+        for idx in 0..(MAX_SESSION_EVENT_HISTORY + 5) as u32 {
+            let event = SessionRealtimeEvent::NoiseWarning {
+                timestamp_ms: idx as u128,
+                baseline_db: 30.0,
+                threshold_db: 45.0,
+                level_db: 60.0,
+                persistence_ms: 300,
+            };
+            manager
+                .record_session_event(event)
+                .expect("record session event");
+        }
+
+        let history = manager
+            .session_event_history()
+            .expect("read session event history");
+        assert_eq!(history.len(), MAX_SESSION_EVENT_HISTORY);
+        assert!(matches!(
+            history.last().unwrap(),
+            SessionRealtimeEvent::NoiseWarning { level_db, .. } if (*level_db - 60.0).abs() < f32::EPSILON
+        ));
+    }
+
+    #[test]
+    fn session_realtime_event_validation_rejects_invalid_countdown() {
+        let invalid = SessionRealtimeEvent::SilenceCountdown {
+            timestamp_ms: 1,
+            total_ms: 5000,
+            remaining_ms: 6000,
+            state: SessionSilenceCountdownState::Tick,
+            cancel_reason: None,
+        };
+
+        assert!(invalid.validate().is_err());
+
+        let missing_reason = SessionRealtimeEvent::SilenceCountdown {
+            timestamp_ms: 2,
+            total_ms: 5000,
+            remaining_ms: 2000,
+            state: SessionSilenceCountdownState::Canceled,
+            cancel_reason: None,
+        };
+
+        assert!(missing_reason.validate().is_err());
+    }
+
+    #[test]
+    fn session_realtime_event_from_core_event_maps_fields() {
+        let warning = CoreSessionNoiseWarning {
+            baseline_db: 20.0,
+            threshold_db: 35.0,
+            level_db: 52.0,
+            persistence_ms: 250,
+        };
+        let countdown = CoreSessionSilenceCountdown {
+            total_ms: 5000,
+            remaining_ms: 3000,
+            state: CoreSilenceCountdownState::Started,
+            cancel_reason: None,
+        };
+        let auto_stop = CoreAutoStopReason::SilenceTimeout;
+
+        match SessionRealtimeEvent::from_core_event(CoreSessionEvent::NoiseWarning(warning)) {
+            SessionRealtimeEvent::NoiseWarning {
+                baseline_db,
+                threshold_db,
+                level_db,
+                persistence_ms,
+                ..
+            } => {
+                assert!((baseline_db - 20.0).abs() < f32::EPSILON);
+                assert!((threshold_db - 35.0).abs() < f32::EPSILON);
+                assert!((level_db - 52.0).abs() < f32::EPSILON);
+                assert_eq!(persistence_ms, 250);
+            }
+            _ => panic!("expected noise warning"),
+        }
+
+        match SessionRealtimeEvent::from_core_event(CoreSessionEvent::SilenceCountdown(countdown)) {
+            SessionRealtimeEvent::SilenceCountdown {
+                total_ms,
+                remaining_ms,
+                state,
+                cancel_reason,
+                ..
+            } => {
+                assert_eq!(total_ms, 5000);
+                assert_eq!(remaining_ms, 3000);
+                assert_eq!(state, SessionSilenceCountdownState::Started);
+                assert!(cancel_reason.is_none());
+            }
+            _ => panic!("expected silence countdown"),
+        }
+
+        match SessionRealtimeEvent::from_core_event(CoreSessionEvent::AutoStop(
+            flowwisper_core::session::SessionAutoStop { reason: auto_stop },
+        )) {
+            SessionRealtimeEvent::AutoStop { reason, .. } => {
+                assert_eq!(reason, SessionAutoStopReason::SilenceTimeout);
+            }
+            _ => panic!("expected auto-stop"),
+        }
     }
 }

@@ -20,6 +20,16 @@ const MAX_FRAME_MS: u64 = 200;
 const VAD_THRESHOLD: f32 = 1e-4;
 const WAVEFORM_FRAME_MS: u64 = 32;
 
+mod noise;
+pub use noise::{NoiseDetector, NoiseEvent, SilenceCountdownStatus};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioCaptureStage {
+    Idle,
+    PreRoll,
+    Recording,
+}
+
 #[derive(Clone)]
 pub struct AudioPipeline {
     waveform_tx: broadcast::Sender<WaveformFrame>,
@@ -30,6 +40,9 @@ pub struct AudioPipeline {
     waveform_frame_samples: usize,
     waveform_pending: Arc<Mutex<VecDeque<f32>>>,
     waveform_started: Arc<AtomicBool>,
+    noise_tx: broadcast::Sender<NoiseEvent>,
+    noise_detector: Arc<Mutex<NoiseDetector>>,
+    stage: Arc<Mutex<AudioCaptureStage>>,
 }
 
 #[derive(Clone)]
@@ -187,6 +200,9 @@ impl AudioPipeline {
             duration_to_samples(Duration::from_millis(MAX_FRAME_MS), SAMPLE_RATE_HZ);
         let waveform_frame_samples =
             duration_to_samples(Duration::from_millis(WAVEFORM_FRAME_MS), SAMPLE_RATE_HZ);
+        let (noise_tx, _) = broadcast::channel(32);
+        let noise_detector = Arc::new(Mutex::new(NoiseDetector::new(SAMPLE_RATE_HZ)));
+        let stage = Arc::new(Mutex::new(AudioCaptureStage::Idle));
         let pipeline = Self {
             waveform_tx,
             pcm_subscribers,
@@ -196,6 +212,9 @@ impl AudioPipeline {
             waveform_frame_samples,
             waveform_pending: Arc::new(Mutex::new(VecDeque::new())),
             waveform_started: Arc::new(AtomicBool::new(false)),
+            noise_tx,
+            noise_detector,
+            stage,
         };
 
         pipeline.spawn_waveform_scheduler();
@@ -205,6 +224,10 @@ impl AudioPipeline {
 
     pub fn subscribe_waveform(&self) -> broadcast::Receiver<WaveformFrame> {
         self.waveform_tx.subscribe()
+    }
+
+    pub fn subscribe_noise_events(&self) -> broadcast::Receiver<NoiseEvent> {
+        self.noise_tx.subscribe()
     }
 
     pub fn subscribe_pcm_frames(&self, capacity: usize) -> mpsc::Receiver<Arc<[f32]>> {
@@ -318,6 +341,7 @@ impl AudioPipeline {
         }
 
         self.emit_waveform_samples(&chunk);
+        self.process_noise_samples(&chunk);
 
         let shared: Arc<[f32]> = chunk.into();
         let subscribers = self.collect_subscribers();
@@ -340,6 +364,37 @@ impl AudioPipeline {
         drop(guard);
 
         self.waveform_started.store(true, Ordering::SeqCst);
+    }
+
+    fn process_noise_samples(&self, samples: &[f32]) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let stage = {
+            let guard = self.stage.lock().expect("audio stage mutex poisoned");
+            *guard
+        };
+
+        if matches!(stage, AudioCaptureStage::Idle) {
+            return;
+        }
+
+        let events = {
+            let mut detector = self
+                .noise_detector
+                .lock()
+                .expect("noise detector mutex poisoned");
+            detector.ingest(samples, stage)
+        };
+
+        self.dispatch_noise_events(events);
+    }
+
+    fn dispatch_noise_events(&self, events: Vec<NoiseEvent>) {
+        for event in events {
+            let _ = self.noise_tx.send(event);
+        }
     }
 
     fn flush_waveform_tail(&self) {
@@ -384,6 +439,49 @@ impl AudioPipeline {
 
         self.push_pcm_frame(frame).await?;
         Ok(())
+    }
+
+    pub fn begin_preroll(&self, baseline_db: Option<f32>) {
+        {
+            let mut stage = self.stage.lock().expect("audio stage mutex poisoned");
+            *stage = AudioCaptureStage::PreRoll;
+        }
+
+        let events = {
+            let mut detector = self
+                .noise_detector
+                .lock()
+                .expect("noise detector mutex poisoned");
+            detector.enter_preroll(baseline_db)
+        };
+
+        self.dispatch_noise_events(events);
+    }
+
+    pub fn begin_recording(&self) {
+        {
+            let mut stage = self.stage.lock().expect("audio stage mutex poisoned");
+            *stage = AudioCaptureStage::Recording;
+        }
+
+        let mut detector = self
+            .noise_detector
+            .lock()
+            .expect("noise detector mutex poisoned");
+        detector.enter_recording();
+    }
+
+    pub fn reset_session(&self) {
+        {
+            let mut stage = self.stage.lock().expect("audio stage mutex poisoned");
+            *stage = AudioCaptureStage::Idle;
+        }
+
+        let mut detector = self
+            .noise_detector
+            .lock()
+            .expect("noise detector mutex poisoned");
+        detector.reset();
     }
 }
 
@@ -604,5 +702,36 @@ mod tests {
             .expect("waveform channel closed unexpectedly");
         assert!(frame.rms > 0.0);
         assert!(frame.vad_active);
+    }
+
+    #[tokio::test]
+    async fn noise_baseline_event_emitted_after_sampling() {
+        let pipeline = AudioPipeline::new();
+        pipeline.begin_preroll(None);
+        let mut noise_rx = pipeline.subscribe_noise_events();
+
+        let frame = vec![0.1_f32; duration_to_samples(Duration::from_millis(500), SAMPLE_RATE_HZ)];
+
+        pipeline
+            .push_pcm_frame(frame)
+            .await
+            .expect("pcm frame should enqueue");
+
+        let event = timeout(Duration::from_millis(200), noise_rx.recv())
+            .await
+            .expect("noise baseline event timed out")
+            .expect("noise channel closed unexpectedly");
+
+        match event {
+            NoiseEvent::BaselineEstablished { level_db } => {
+                assert!((level_db + 20.0).abs() < 1.5);
+            }
+            NoiseEvent::NoiseWarning(_) => {
+                panic!("expected baseline event, received noise warning");
+            }
+            NoiseEvent::SilenceCountdown(_) => {
+                panic!("expected baseline event, received silence countdown");
+            }
+        }
     }
 }

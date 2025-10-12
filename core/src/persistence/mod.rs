@@ -2,7 +2,7 @@
 
 pub mod sqlite;
 
-use crate::persistence::sqlite::{SqliteConfig, SqlitePersistence};
+use crate::persistence::sqlite::SqlitePersistence;
 use crate::session::history::{
     AccuracyUpdate, HistoryEntry, HistoryPage, HistoryPostAction, HistoryQuery, SessionSnapshot,
 };
@@ -328,6 +328,13 @@ impl PersistenceHandle {
     }
 }
 
+#[cfg(test)]
+impl PersistenceHandle {
+    pub fn sqlite(&self) -> Arc<SqlitePersistence> {
+        Arc::clone(&self.sqlite)
+    }
+}
+
 pub struct PersistenceActor {
     rx: mpsc::Receiver<PersistenceCommand>,
     drafts: VecDeque<DraftRecord>,
@@ -555,12 +562,12 @@ impl PersistenceActor {
         let effective_limit = limit.min(self.drafts.len());
         self.drafts
             .iter()
-            .rev()          // Reverse iterator (newest first)
-            .take(effective_limit)  // Take the newest N items
+            .rev() // Reverse iterator (newest first)
+            .take(effective_limit) // Take the newest N items
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
-            .rev()          // Reverse again (oldest first among the taken items)
+            .rev() // Reverse again (oldest first among the taken items)
             .collect()
     }
 
@@ -568,12 +575,12 @@ impl PersistenceActor {
         let effective_limit = limit.min(self.notices.len());
         self.notices
             .iter()
-            .rev()          // Reverse iterator (newest first)
-            .take(effective_limit)  // Take the newest N items
+            .rev() // Reverse iterator (newest first)
+            .take(effective_limit) // Take the newest N items
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
-            .rev()          // Reverse again (oldest first among the taken items)
+            .rev() // Reverse again (oldest first among the taken items)
             .collect()
     }
 
@@ -598,6 +605,7 @@ where
 #[cfg(test)]
 mod legacy_tests {
     use super::*;
+    use crate::persistence::sqlite::SqliteConfig;
     use tokio::sync::mpsc;
 
     #[tokio::test]

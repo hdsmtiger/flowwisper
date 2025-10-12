@@ -19,17 +19,17 @@ use crate::session::clipboard::{ClipboardFallback, ClipboardManager};
 use crate::session::history::{
     AccuracyUpdate, HistoryEntry, HistoryPage, HistoryPostAction, HistoryQuery, SessionSnapshot,
 };
-use crate::session::lifecycle::{
-    SessionLifecyclePayload, SessionLifecyclePhase, SessionLifecycleUpdate,
-};
+use crate::session::lifecycle::{SessionLifecyclePhase, SessionLifecycleUpdate};
 use crate::session::publisher::{
-    FallbackStrategy, FocusWindowContext, PublishOutcome, PublishRequest, PublishStrategy,
-    Publisher, PublisherFailure, PublisherFailureCode, PublisherStatus, SessionPublisher,
+    FallbackStrategy, PublishOutcome, PublishRequest, PublishStrategy, Publisher,
+    PublisherFailure, PublisherFailureCode, PublisherStatus, SessionPublisher,
 };
 use crate::telemetry::events::{
-    record_session_draft_failed, record_session_draft_saved, record_session_publish_attempt,
-    record_session_publish_degradation, record_session_publish_failure,
-    record_session_publish_outcome,
+    record_session_draft_failed, record_session_draft_saved, record_session_noise_warning,
+    record_session_publish_attempt, record_session_publish_degradation,
+    record_session_publish_failure, record_session_publish_outcome,
+    record_session_silence_autostop, record_session_silence_countdown, EVENT_NOISE_WARNING,
+    EVENT_SILENCE_AUTOSTOP, EVENT_SILENCE_COUNTDOWN,
 };
 use anyhow::{anyhow, Context, Result};
 use dirs::data_dir;
@@ -40,7 +40,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{
+    broadcast::{self, error::RecvError},
+    mpsc, Mutex,
+};
 use tokio::time::{interval, timeout, Duration};
 use tracing::{error, info, warn};
 
@@ -49,6 +52,59 @@ const NOTICE_ACTION_COPY: &str = "copy";
 const NOTICE_RESULT_SUCCESS: &str = "success";
 const NOTICE_RESULT_FAILURE: &str = "failure";
 const HISTORY_CLEANUP_INTERVAL_SECS: u64 = 30 * 60;
+
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    NoiseWarning(SessionNoiseWarning),
+    SilenceCountdown(SessionSilenceCountdown),
+    AutoStop(SessionAutoStop),
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionNoiseWarning {
+    pub baseline_db: f32,
+    pub threshold_db: f32,
+    pub level_db: f32,
+    pub persistence_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilenceCountdownState {
+    Started,
+    Tick,
+    Canceled,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSilenceCountdown {
+    pub total_ms: u32,
+    pub remaining_ms: u32,
+    pub state: SilenceCountdownState,
+    pub cancel_reason: Option<SilenceCancellationReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoStopReason {
+    SilenceTimeout,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionAutoStop {
+    pub reason: AutoStopReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SilenceCancellationReason {
+    SpeechDetected,
+    ManualStop,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SilenceCountdownSnapshot {
+    total_ms: u32,
+    remaining_ms: u32,
+}
 
 fn resolve_persistence_config() -> Result<SqliteConfig> {
     let base_dir = match env::var("FLOWWISPER_DATA_DIR").map(PathBuf::from) {
@@ -89,10 +145,15 @@ pub struct SessionManager {
     persistence: PersistenceHandle,
     update_tx: broadcast::Sender<TranscriptionUpdate>,
     lifecycle_tx: broadcast::Sender<SessionLifecycleUpdate>,
+    event_tx: broadcast::Sender<SessionEvent>,
     publisher: Arc<dyn SessionPublisher>,
     clipboard: ClipboardManager,
     clipboard_fallback: Arc<Mutex<Option<ClipboardFallback>>>,
     history_cleanup_started: AtomicBool,
+    silence_countdown_active: Arc<AtomicBool>,
+    auto_stop_triggered: Arc<AtomicBool>,
+    silence_countdown_snapshot: Arc<Mutex<Option<SilenceCountdownSnapshot>>>,
+    active_session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl SessionManager {
@@ -143,18 +204,32 @@ impl SessionManager {
             spawn_persistence_runtime(config).expect("persistence runtime should spawn");
         let (update_tx, _) = broadcast::channel(64);
         let (lifecycle_tx, _) = broadcast::channel(32);
+        let (event_tx, _) = broadcast::channel(32);
+        let silence_countdown_active = Arc::new(AtomicBool::new(false));
+        let auto_stop_triggered = Arc::new(AtomicBool::new(false));
+        let silence_countdown_snapshot = Arc::new(Mutex::new(None));
+        let active_session_id = Arc::new(Mutex::new(None));
 
-        Self {
+        let manager = Self {
             audio,
             orchestrator,
             persistence,
             update_tx,
             lifecycle_tx,
+            event_tx,
             publisher,
             clipboard,
             clipboard_fallback: Arc::new(Mutex::new(None)),
             history_cleanup_started: AtomicBool::new(false),
-        }
+            silence_countdown_active,
+            auto_stop_triggered,
+            silence_countdown_snapshot,
+            active_session_id,
+        };
+
+        manager.spawn_noise_listener();
+
+        manager
     }
 
     #[cfg(test)]
@@ -185,6 +260,379 @@ impl SessionManager {
 
     pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<SessionLifecycleUpdate> {
         self.lifecycle_tx.subscribe()
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub async fn set_active_session_id<S: Into<String>>(&self, session_id: S) {
+        let mut guard = self.active_session_id.lock().await;
+        *guard = Some(session_id.into());
+    }
+
+    pub async fn clear_active_session_id(&self) {
+        let mut guard = self.active_session_id.lock().await;
+        *guard = None;
+    }
+
+    fn spawn_noise_listener(&self) {
+        let mut noise_rx = self.audio.subscribe_noise_events();
+        let event_tx = self.event_tx.clone();
+        let audio = self.audio.clone();
+        let persistence = self.persistence.clone();
+        let countdown_active = Arc::clone(&self.silence_countdown_active);
+        let auto_stop_triggered = Arc::clone(&self.auto_stop_triggered);
+        let snapshot = Arc::clone(&self.silence_countdown_snapshot);
+        let active_session_id = Arc::clone(&self.active_session_id);
+
+        tokio::spawn(async move {
+            loop {
+                match noise_rx.recv().await {
+                    Ok(crate::audio::NoiseEvent::NoiseWarning(payload)) => {
+                        let event = SessionEvent::NoiseWarning(SessionNoiseWarning {
+                            baseline_db: payload.baseline_db,
+                            threshold_db: payload.threshold_db,
+                            level_db: payload.window_db,
+                            persistence_ms: payload.persistence_ms,
+                        });
+
+                        let timestamp = SystemTime::now();
+                        let session_id = {
+                            active_session_id
+                                .lock()
+                                .await
+                                .clone()
+                                .unwrap_or_else(|| "unassigned".to_string())
+                        };
+
+                        record_session_noise_warning(
+                            &session_id,
+                            payload.baseline_db,
+                            payload.threshold_db,
+                            payload.window_db,
+                            payload.persistence_ms,
+                            false,
+                            timestamp,
+                        );
+
+                        if let Err(err) = event_tx.send(event) {
+                            warn!(
+                                target: "session_manager",
+                                %err,
+                                "failed to broadcast noise warning event",
+                            );
+                        }
+
+                        let occurred_at_ms = system_time_to_ms(timestamp);
+                        let queue_payload = json!({
+                            "sessionId": session_id,
+                            "occurredAtMs": occurred_at_ms,
+                            "baselineDb": payload.baseline_db,
+                            "thresholdDb": payload.threshold_db,
+                            "levelDb": payload.window_db,
+                            "persistenceMs": payload.persistence_ms,
+                            "strongNoiseMode": false,
+                        });
+
+                        if let Err(err) = persistence
+                            .enqueue_telemetry(
+                                session_id,
+                                EVENT_NOISE_WARNING.to_string(),
+                                queue_payload,
+                            )
+                            .await
+                        {
+                            warn!(
+                                target: "session_manager",
+                                %err,
+                                "failed to queue noise warning telemetry",
+                            );
+                        }
+                    }
+                    Ok(crate::audio::NoiseEvent::SilenceCountdown(payload)) => {
+                        let state = match payload.status {
+                            crate::audio::SilenceCountdownStatus::Started => {
+                                SilenceCountdownState::Started
+                            }
+                            crate::audio::SilenceCountdownStatus::Tick => {
+                                SilenceCountdownState::Tick
+                            }
+                            crate::audio::SilenceCountdownStatus::Canceled => {
+                                SilenceCountdownState::Canceled
+                            }
+                            crate::audio::SilenceCountdownStatus::Completed => {
+                                SilenceCountdownState::Completed
+                            }
+                        };
+
+                        let mut snapshot_guard = snapshot.lock().await;
+                        match state {
+                            SilenceCountdownState::Canceled => {
+                                *snapshot_guard = None;
+                            }
+                            _ => {
+                                *snapshot_guard = Some(SilenceCountdownSnapshot {
+                                    total_ms: payload.total_ms,
+                                    remaining_ms: payload.remaining_ms,
+                                });
+                            }
+                        }
+                        drop(snapshot_guard);
+
+                        let cancel_reason = if matches!(state, SilenceCountdownState::Canceled) {
+                            Some(SilenceCancellationReason::SpeechDetected)
+                        } else {
+                            None
+                        };
+
+                        let countdown_event =
+                            SessionEvent::SilenceCountdown(SessionSilenceCountdown {
+                                total_ms: payload.total_ms,
+                                remaining_ms: payload.remaining_ms,
+                                state,
+                                cancel_reason,
+                            });
+
+                        if let Err(err) = event_tx.send(countdown_event) {
+                            warn!(
+                                target: "session_manager",
+                                %err,
+                                "failed to broadcast silence countdown event",
+                            );
+                        }
+
+                        if !matches!(state, SilenceCountdownState::Tick) {
+                            let timestamp = SystemTime::now();
+                            let session_id = {
+                                active_session_id
+                                    .lock()
+                                    .await
+                                    .clone()
+                                    .unwrap_or_else(|| "unassigned".to_string())
+                            };
+                            let cancel_reason_value = cancel_reason.map(|reason| match reason {
+                                SilenceCancellationReason::SpeechDetected => "speechDetected",
+                                SilenceCancellationReason::ManualStop => "manualStop",
+                            });
+
+                            record_session_silence_countdown(
+                                &session_id,
+                                countdown_state_label(state),
+                                payload.total_ms,
+                                payload.remaining_ms,
+                                cancel_reason_value,
+                                timestamp,
+                            );
+
+                            let timestamp_ms = system_time_to_ms(timestamp);
+                            let queue_payload = json!({
+                                "sessionId": session_id,
+                                "timestampMs": timestamp_ms,
+                                "state": countdown_state_label(state),
+                                "totalMs": payload.total_ms,
+                                "remainingMs": payload.remaining_ms,
+                                "cancelReason": cancel_reason_value,
+                            });
+
+                            if let Err(err) = persistence
+                                .enqueue_telemetry(
+                                    queue_payload["sessionId"]
+                                        .as_str()
+                                        .unwrap_or("unassigned")
+                                        .to_string(),
+                                    EVENT_SILENCE_COUNTDOWN.to_string(),
+                                    queue_payload,
+                                )
+                                .await
+                            {
+                                warn!(
+                                    target: "session_manager",
+                                    %err,
+                                    "failed to queue silence countdown telemetry",
+                                );
+                            }
+                        }
+
+                        match state {
+                            SilenceCountdownState::Started => {
+                                countdown_active.store(true, Ordering::SeqCst);
+                                auto_stop_triggered.store(false, Ordering::SeqCst);
+                            }
+                            SilenceCountdownState::Tick => {
+                                countdown_active.store(true, Ordering::SeqCst);
+                            }
+                            SilenceCountdownState::Canceled => {
+                                countdown_active.store(false, Ordering::SeqCst);
+                                auto_stop_triggered.store(false, Ordering::SeqCst);
+                            }
+                            SilenceCountdownState::Completed => {
+                                countdown_active.store(false, Ordering::SeqCst);
+                                let already_triggered =
+                                    auto_stop_triggered.swap(true, Ordering::SeqCst);
+                                if !already_triggered {
+                                    {
+                                        let mut guard = snapshot.lock().await;
+                                        *guard = None;
+                                    }
+
+                                    let auto_stop_event = SessionEvent::AutoStop(SessionAutoStop {
+                                        reason: AutoStopReason::SilenceTimeout,
+                                    });
+
+                                    if let Err(err) = event_tx.send(auto_stop_event) {
+                                        warn!(
+                                            target: "session_manager",
+                                            %err,
+                                            "failed to broadcast auto-stop event",
+                                        );
+                                    }
+
+                                    audio.reset_session();
+                                    info!(
+                                        target: "session_manager",
+                                        "silence countdown completed; auto-stop triggered",
+                                    );
+
+                                    let timestamp = SystemTime::now();
+                                    let session_id = {
+                                        active_session_id
+                                            .lock()
+                                            .await
+                                            .clone()
+                                            .unwrap_or_else(|| "unassigned".to_string())
+                                    };
+
+                                    record_session_silence_autostop(
+                                        &session_id,
+                                        payload.total_ms,
+                                        timestamp,
+                                    );
+
+                                    let timestamp_ms = system_time_to_ms(timestamp);
+                                    let queue_payload = json!({
+                                        "sessionId": session_id,
+                                        "timestampMs": timestamp_ms,
+                                        "reason": "silenceTimeout",
+                                        "countdownMs": payload.total_ms,
+                                    });
+
+                                    if let Err(err) = persistence
+                                        .enqueue_telemetry(
+                                            queue_payload["sessionId"]
+                                                .as_str()
+                                                .unwrap_or("unassigned")
+                                                .to_string(),
+                                            EVENT_SILENCE_AUTOSTOP.to_string(),
+                                            queue_payload,
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            target: "session_manager",
+                                            %err,
+                                            "failed to queue silence autostop telemetry",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(crate::audio::NoiseEvent::BaselineEstablished { .. }) => {
+                        countdown_active.store(false, Ordering::SeqCst);
+                        auto_stop_triggered.store(false, Ordering::SeqCst);
+                        let mut guard = snapshot.lock().await;
+                        *guard = None;
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!(
+                            target: "session_manager",
+                            skipped,
+                            "noise event listener lagged",
+                        );
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    pub async fn cancel_silence_countdown_due_to_manual_stop(&self) {
+        let was_active = self.silence_countdown_active.swap(false, Ordering::SeqCst);
+        self.auto_stop_triggered.store(false, Ordering::SeqCst);
+
+        if !was_active {
+            return;
+        }
+
+        let snapshot = {
+            let mut guard = self.silence_countdown_snapshot.lock().await;
+            guard.take().unwrap_or(SilenceCountdownSnapshot {
+                total_ms: 5_000,
+                remaining_ms: 5_000,
+            })
+        };
+
+        let event = SessionEvent::SilenceCountdown(SessionSilenceCountdown {
+            total_ms: snapshot.total_ms,
+            remaining_ms: snapshot.remaining_ms,
+            state: SilenceCountdownState::Canceled,
+            cancel_reason: Some(SilenceCancellationReason::ManualStop),
+        });
+
+        if let Err(err) = self.event_tx.send(event) {
+            warn!(
+                target: "session_manager",
+                %err,
+                "failed to broadcast manual silence cancellation",
+            );
+        }
+
+        let timestamp = SystemTime::now();
+        let session_id = {
+            self.active_session_id
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string())
+        };
+
+        record_session_silence_countdown(
+            &session_id,
+            countdown_state_label(SilenceCountdownState::Canceled),
+            snapshot.total_ms,
+            snapshot.remaining_ms,
+            Some("manualStop"),
+            timestamp,
+        );
+
+        let queue_payload = json!({
+            "sessionId": session_id,
+            "timestampMs": system_time_to_ms(timestamp),
+            "state": "canceled",
+            "totalMs": snapshot.total_ms,
+            "remainingMs": snapshot.remaining_ms,
+            "cancelReason": "manualStop",
+        });
+
+        if let Err(err) = self
+            .persistence
+            .enqueue_telemetry(
+                queue_payload["sessionId"]
+                    .as_str()
+                    .unwrap_or("unassigned")
+                    .to_string(),
+                EVENT_SILENCE_COUNTDOWN.to_string(),
+                queue_payload,
+            )
+            .await
+        {
+            warn!(
+                target: "session_manager",
+                %err,
+                "failed to queue manual silence cancel telemetry",
+            );
+        }
     }
 
     async fn persist_transcript(&self, snapshot: SessionSnapshot) -> Result<()> {
@@ -707,6 +1155,22 @@ fn fallback_option(strategy: &FallbackStrategy) -> Option<FallbackStrategy> {
     }
 }
 
+fn countdown_state_label(state: SilenceCountdownState) -> &'static str {
+    match state {
+        SilenceCountdownState::Started => "started",
+        SilenceCountdownState::Tick => "tick",
+        SilenceCountdownState::Canceled => "canceled",
+        SilenceCountdownState::Completed => "completed",
+    }
+}
+
+fn system_time_to_ms(timestamp: SystemTime) -> u128 {
+    timestamp
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
 fn make_notice_id(session_id: &str) -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -731,13 +1195,15 @@ mod tests {
         UpdatePayload,
     };
     use crate::session::clipboard::{ClipboardAccess, ClipboardError, ClipboardManager};
+    use crate::session::lifecycle::SessionLifecyclePayload;
+    use crate::session::publisher::FocusWindowContext;
     use crate::session::publisher::PublisherError;
     use anyhow::anyhow;
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::{broadcast::error::RecvError, Mutex as AsyncMutex};
     use tokio::time::{timeout, Duration};
 
     struct ProgrammedSpeechEngine {
@@ -843,6 +1309,368 @@ mod tests {
             *self.state.lock().await = None;
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn noise_warning_events_forwarded_to_session_channel() {
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok(String::new())]));
+        let orchestrator = EngineOrchestrator::with_engine(
+            EngineConfig {
+                prefer_cloud: false,
+            },
+            local_engine,
+        );
+        let manager = SessionManager::with_orchestrator(orchestrator);
+        manager
+            .run()
+            .await
+            .expect("session manager bootstrap should succeed");
+
+        manager.set_active_session_id("session-manual-stop").await;
+
+        manager
+            .set_active_session_id("session-noise-telemetry")
+            .await;
+
+        let audio = manager.audio_pipeline();
+        let mut events_rx = manager.subscribe_events();
+
+        audio.begin_preroll(Some(-32.0));
+        audio.begin_recording();
+
+        let loud_frame = vec![0.8_f32; 1_600];
+        for _ in 0..3 {
+            audio
+                .push_pcm_frame(loud_frame.clone())
+                .await
+                .expect("push loud frame");
+        }
+
+        let warning = timeout(Duration::from_millis(800), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(SessionEvent::NoiseWarning(payload)) => break payload,
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("noise warning timed out");
+
+        assert!((warning.threshold_db - warning.baseline_db - 15.0).abs() < 0.5);
+        assert!(warning.level_db >= warning.threshold_db);
+        assert!(warning.persistence_ms >= 300);
+    }
+
+    #[tokio::test]
+    async fn silence_countdown_completion_triggers_auto_stop_once() {
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok(String::new())]));
+        let orchestrator = EngineOrchestrator::with_engine(
+            EngineConfig {
+                prefer_cloud: false,
+            },
+            local_engine,
+        );
+        let manager = SessionManager::with_orchestrator(orchestrator);
+        manager
+            .run()
+            .await
+            .expect("session manager bootstrap should succeed");
+
+        manager
+            .set_active_session_id("session-silence-autostop")
+            .await;
+
+        let audio = manager.audio_pipeline();
+        let mut events_rx = manager.subscribe_events();
+
+        audio.begin_preroll(Some(-28.0));
+        audio.begin_recording();
+
+        let quiet_frame = vec![0.001_f32; 1_600];
+        for _ in 0..50 {
+            audio
+                .push_pcm_frame(quiet_frame.clone())
+                .await
+                .expect("push quiet frame");
+        }
+
+        let mut countdown_completed = false;
+        let mut auto_stop_count = 0;
+
+        for _ in 0..128 {
+            let event = timeout(Duration::from_millis(1_000), events_rx.recv())
+                .await
+                .expect("waiting for session event timed out");
+
+            match event {
+                Ok(SessionEvent::SilenceCountdown(payload))
+                    if payload.state == SilenceCountdownState::Completed =>
+                {
+                    countdown_completed = true;
+                }
+                Ok(SessionEvent::AutoStop(_)) => {
+                    auto_stop_count += 1;
+                    break;
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => continue,
+                Err(err) => panic!("session event channel closed: {err:?}"),
+            }
+        }
+
+        assert!(countdown_completed, "expected countdown completion event");
+        assert_eq!(auto_stop_count, 1, "auto-stop should trigger exactly once");
+
+        for _ in 0..5 {
+            audio
+                .push_pcm_frame(quiet_frame.clone())
+                .await
+                .expect("push quiet frame after auto-stop");
+        }
+
+        if let Ok(event) = timeout(Duration::from_millis(250), events_rx.recv()).await {
+            if let Ok(event) = event {
+                assert!(
+                    !matches!(event, SessionEvent::AutoStop(_)),
+                    "unexpected extra auto-stop event",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_stop_cancels_active_silence_countdown() {
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok(String::new())]));
+        let orchestrator = EngineOrchestrator::with_engine(
+            EngineConfig {
+                prefer_cloud: false,
+            },
+            local_engine,
+        );
+        let manager = SessionManager::with_orchestrator(orchestrator);
+        manager
+            .run()
+            .await
+            .expect("session manager bootstrap should succeed");
+
+        manager.set_active_session_id("session-manual-stop").await;
+
+        let audio = manager.audio_pipeline();
+        let mut events_rx = manager.subscribe_events();
+
+        audio.begin_preroll(Some(-30.0));
+        audio.begin_recording();
+
+        let quiet_frame = vec![0.001_f32; 1_600];
+        audio
+            .push_pcm_frame(quiet_frame.clone())
+            .await
+            .expect("push quiet frame");
+
+        timeout(Duration::from_millis(800), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(SessionEvent::SilenceCountdown(payload))
+                        if payload.state == SilenceCountdownState::Started =>
+                    {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("countdown start not observed");
+
+        manager.cancel_silence_countdown_due_to_manual_stop().await;
+
+        let canceled = timeout(Duration::from_millis(800), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(SessionEvent::SilenceCountdown(payload))
+                        if payload.state == SilenceCountdownState::Canceled =>
+                    {
+                        break payload;
+                    }
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("manual cancellation event missing");
+
+        assert_eq!(
+            canceled.cancel_reason,
+            Some(SilenceCancellationReason::ManualStop),
+            "expected manual stop cancel reason",
+        );
+
+        audio.reset_session();
+        audio.begin_preroll(Some(-30.0));
+        audio.begin_recording();
+
+        for _ in 0..10 {
+            audio
+                .push_pcm_frame(quiet_frame.clone())
+                .await
+                .expect("push quiet frame after restart");
+        }
+
+        timeout(Duration::from_millis(1_200), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(SessionEvent::SilenceCountdown(payload))
+                        if payload.state == SilenceCountdownState::Started =>
+                    {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("countdown did not restart after manual cancel");
+    }
+
+    #[tokio::test]
+    async fn noise_warning_is_persisted_to_telemetry_queue() {
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok(String::new())]));
+        let orchestrator = EngineOrchestrator::with_engine(
+            EngineConfig {
+                prefer_cloud: false,
+            },
+            local_engine,
+        );
+        let manager = SessionManager::with_orchestrator(orchestrator);
+        manager
+            .run()
+            .await
+            .expect("session manager bootstrap should succeed");
+
+        manager
+            .set_active_session_id("session-telemetry-noise")
+            .await;
+
+        let audio = manager.audio_pipeline();
+        audio.begin_preroll(Some(-36.0));
+        audio.begin_recording();
+
+        let loud_frame = vec![0.9_f32; 1_600];
+        for _ in 0..3 {
+            audio
+                .push_pcm_frame(loud_frame.clone())
+                .await
+                .expect("push loud frame");
+        }
+
+        let mut rx = manager.subscribe_events();
+        timeout(Duration::from_millis(800), async {
+            loop {
+                match rx.recv().await {
+                    Ok(SessionEvent::NoiseWarning(_)) => break,
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("noise warning timed out");
+
+        let persistence = manager.persistence_handle();
+        let conn = persistence
+            .sqlite()
+            .connection()
+            .expect("persistence connection");
+        let (event_type, payload): (String, String) = conn
+            .query_row(
+                "SELECT event_type, payload FROM telemetry_queue ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("telemetry row");
+
+        assert_eq!(event_type, EVENT_NOISE_WARNING);
+        let payload_json: serde_json::Value =
+            serde_json::from_str(&payload).expect("noise telemetry payload");
+        assert_eq!(payload_json["sessionId"], "session-telemetry-noise");
+        assert!(payload_json["thresholdDb"].as_f64().is_some());
+        assert!(payload_json["occurredAtMs"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn silence_completion_records_auto_stop_telemetry() {
+        let local_engine = Arc::new(ProgrammedSpeechEngine::new(vec![Ok(String::new())]));
+        let orchestrator = EngineOrchestrator::with_engine(
+            EngineConfig {
+                prefer_cloud: false,
+            },
+            local_engine,
+        );
+        let manager = SessionManager::with_orchestrator(orchestrator);
+        manager
+            .run()
+            .await
+            .expect("session manager bootstrap should succeed");
+
+        manager
+            .set_active_session_id("session-telemetry-silence")
+            .await;
+
+        let audio = manager.audio_pipeline();
+        audio.begin_preroll(Some(-28.0));
+        audio.begin_recording();
+
+        let quiet_frame = vec![0.0005_f32; 1_600];
+        for _ in 0..60 {
+            audio
+                .push_pcm_frame(quiet_frame.clone())
+                .await
+                .expect("push quiet frame");
+        }
+
+        let mut rx = manager.subscribe_events();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                match rx.recv().await {
+                    Ok(SessionEvent::AutoStop(_)) => break,
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(err) => panic!("session event channel closed: {err:?}"),
+                }
+            }
+        })
+        .await
+        .expect("auto-stop timed out");
+
+        let persistence = manager.persistence_handle();
+        let conn = persistence
+            .sqlite()
+            .connection()
+            .expect("persistence connection");
+        let (event_type, payload): (String, String) = conn
+            .query_row(
+                "SELECT event_type, payload FROM telemetry_queue ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("telemetry row");
+
+        assert_eq!(event_type, EVENT_SILENCE_AUTOSTOP);
+        let payload_json: serde_json::Value =
+            serde_json::from_str(&payload).expect("auto-stop telemetry payload");
+        assert_eq!(payload_json["sessionId"], "session-telemetry-silence");
+        assert_eq!(payload_json["reason"], "silenceTimeout");
+        assert!(payload_json["countdownMs"].as_u64().is_some());
     }
 
     #[tokio::test]

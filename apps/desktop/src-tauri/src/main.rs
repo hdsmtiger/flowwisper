@@ -27,8 +27,8 @@ use hotkey::{
     HotkeyCompatibilityLayer, HotkeySource,
 };
 use session::{
-    InsertionResult, PublishNotice, PublishingUpdate, SessionStatus, TranscriptSentenceSelection,
-    TranscriptStreamEvent,
+    InsertionResult, PublishNotice, PublishingUpdate, SessionRealtimeEvent, SessionStatus,
+    TranscriptSentenceSelection, TranscriptStreamEvent,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,10 +118,7 @@ struct EnginePreference {
 }
 
 fn resolve_config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut path = app
-        .path()
-        .app_config_dir()
-        .map_err(|err| err.to_string())?;
+    let mut path = app.path().app_config_dir().map_err(|err| err.to_string())?;
     path.push("hotkey.json");
     Ok(path)
 }
@@ -154,7 +151,7 @@ impl HotkeyCompatibilityLayer {
             let _ = combination;
             Ok(None)
         }
-}
+    }
 }
 
 #[tauri::command]
@@ -170,6 +167,11 @@ fn session_timeline(state: State<AppState>) -> Result<Vec<SessionStatus>, String
 #[tauri::command]
 fn session_transcript_log(state: State<AppState>) -> Result<Vec<TranscriptStreamEvent>, String> {
     state.session.transcript_log()
+}
+
+#[tauri::command]
+fn session_event_history(state: State<AppState>) -> Result<Vec<SessionRealtimeEvent>, String> {
+    state.session.session_event_history()
 }
 
 #[tauri::command]
@@ -1077,6 +1079,7 @@ fn main() {
             session_status,
             session_timeline,
             session_transcript_log,
+            session_event_history,
             session_publish_update,
             session_publish_result,
             session_publish_notice,
