@@ -87,6 +87,8 @@ pub struct SqlitePersistence {
     db_path: Option<PathBuf>,
 }
 
+pub(crate) const MAX_TELEMETRY_QUEUE: i64 = 300;
+
 impl SqlitePersistence {
     /// Bootstraps a SQLCipher connection pool and runs the database migrations.
     pub fn bootstrap(config: SqliteConfig) -> Result<Self> {
@@ -470,6 +472,12 @@ impl SqlitePersistence {
             "INSERT INTO telemetry_queue(session_id, event_type, payload, created_at_ms)
              VALUES (?1, ?2, ?3, strftime('%s','now') * 1000)",
             params![session_id, event_type, encoded],
+        )?;
+        conn.execute(
+            "DELETE FROM telemetry_queue WHERE id NOT IN (
+                SELECT id FROM telemetry_queue ORDER BY id DESC LIMIT ?1
+            )",
+            params![MAX_TELEMETRY_QUEUE],
         )?;
         Ok(())
     }

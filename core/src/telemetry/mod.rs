@@ -167,8 +167,8 @@ mod tests {
                     if fields.get("sentence_id").and_then(|v| v.as_u64()) == Some(7)
                         && fields.get("variant").and_then(|v| v.as_str()) == Some("polished")
                         && fields.get("source").and_then(|v| v.as_str()) == Some("local")
-                        && fields.get("latency_ms").and_then(|v| v.as_u64()) == Some(1800) {
-                        
+                        && fields.get("latency_ms").and_then(|v| v.as_u64()) == Some(1800)
+                    {
                         assert_eq!(
                             fields.get("is_primary").and_then(|v| v.as_bool()),
                             Some(true)
@@ -230,7 +230,10 @@ mod tests {
             }
         }
 
-        assert!(saw_latency, "missing latency telemetry record with test data");
+        assert!(
+            saw_latency,
+            "missing latency telemetry record with test data"
+        );
         assert!(saw_revert, "missing revert telemetry record with test data");
     }
 }

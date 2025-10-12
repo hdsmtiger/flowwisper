@@ -22,6 +22,9 @@ import {
   type FallbackStrategy,
   MAX_MULTI_SELECT,
 } from "./hooks/useDualViewTranscript";
+import { useSessionEvents } from "./hooks/useSessionEvents";
+import { NoiseBanner } from "./NoiseBanner";
+import { SilenceCountdown } from "./SilenceCountdown";
 
 import "./styles.css";
 
@@ -801,6 +804,12 @@ export const DualViewPanel = ({
     publishNotices,
   } = transcript;
 
+  const sessionEvents = useSessionEvents();
+  const overlayActive =
+    sessionEvents.noiseWarning.visible ||
+    sessionEvents.countdown.phase !== "idle" ||
+    sessionEvents.autoStop.reason !== null;
+
   const locale = useMemo(() => resolveLocale(), []);
   const localeMessages = useMemo(() => LOCALE_MESSAGES[locale], [locale]);
 
@@ -992,6 +1001,19 @@ export const DualViewPanel = ({
 
   return (
     <div className={containerClass}>
+      {overlayActive ? (
+        <div className="transcription-overlay" role="presentation">
+          <NoiseBanner
+            warning={sessionEvents.noiseWarning}
+            onDismiss={sessionEvents.dismissNoiseWarning}
+          />
+          <SilenceCountdown
+            countdown={sessionEvents.countdown}
+            autoStop={sessionEvents.autoStop}
+            onDismissAutoStop={sessionEvents.resetAutoStop}
+          />
+        </div>
+      ) : null}
       <ResultCard
         sentences={sentences}
         updates={publishUpdates}

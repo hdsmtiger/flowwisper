@@ -1,6 +1,6 @@
 use anyhow::Error;
 use serde::Serialize;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 pub(crate) const TARGET: &str = "telemetry::dual_view";
@@ -20,6 +20,9 @@ pub(crate) const EVENT_HISTORY_PERSIST_FAILURE: &str = "session_history_persist_
 pub(crate) const EVENT_HISTORY_ACCURACY: &str = "session_history_accuracy";
 pub(crate) const EVENT_HISTORY_ACTION: &str = "session_history_action";
 pub(crate) const EVENT_HISTORY_CLEANUP: &str = "session_history_cleanup";
+pub(crate) const EVENT_NOISE_WARNING: &str = "session_noise_warning";
+pub(crate) const EVENT_SILENCE_COUNTDOWN: &str = "session_silence_countdown";
+pub(crate) const EVENT_SILENCE_AUTOSTOP: &str = "session_silence_autostop";
 
 #[derive(Debug, Serialize)]
 pub struct DualViewLatencyEvent {
@@ -93,6 +96,36 @@ pub struct SessionPublishUndoEvent<'a> {
     pub session_id: &'a str,
     pub undo_token: Option<&'a str>,
     pub origin: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionNoiseWarningEvent<'a> {
+    pub session_id: &'a str,
+    pub occurred_at_ms: u128,
+    pub baseline_db: f32,
+    pub threshold_db: f32,
+    pub level_db: f32,
+    pub persistence_ms: u32,
+    pub strong_noise_mode: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSilenceCountdownEvent<'a> {
+    pub session_id: &'a str,
+    pub timestamp_ms: u128,
+    pub state: &'a str,
+    pub total_ms: u32,
+    pub remaining_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionSilenceAutoStopEvent<'a> {
+    pub session_id: &'a str,
+    pub timestamp_ms: u128,
+    pub reason: &'a str,
+    pub countdown_ms: u32,
 }
 
 pub fn record_dual_view_latency(
@@ -408,8 +441,117 @@ pub fn record_session_history_cleanup(count: usize, duration: Duration) {
     );
 }
 
+pub fn record_session_noise_warning(
+    session_id: &str,
+    baseline_db: f32,
+    threshold_db: f32,
+    level_db: f32,
+    persistence_ms: u32,
+    strong_noise_mode: bool,
+    occurred_at: SystemTime,
+) {
+    let event = SessionNoiseWarningEvent {
+        session_id,
+        occurred_at_ms: system_time_to_ms(occurred_at),
+        baseline_db,
+        threshold_db,
+        level_db,
+        persistence_ms,
+        strong_noise_mode,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_NOISE_WARNING,
+            session_id,
+            baseline_db,
+            threshold_db,
+            level_db,
+            persistence_ms,
+            strong_noise_mode,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_NOISE_WARNING,
+            %err,
+            "failed to encode session noise warning telemetry"
+        ),
+    }
+}
+
+pub fn record_session_silence_countdown(
+    session_id: &str,
+    state: &str,
+    total_ms: u32,
+    remaining_ms: u32,
+    cancel_reason: Option<&str>,
+    timestamp: SystemTime,
+) {
+    let event = SessionSilenceCountdownEvent {
+        session_id,
+        timestamp_ms: system_time_to_ms(timestamp),
+        state,
+        total_ms,
+        remaining_ms,
+        cancel_reason,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_SILENCE_COUNTDOWN,
+            session_id,
+            state,
+            total_ms,
+            remaining_ms,
+            cancel_reason,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_SILENCE_COUNTDOWN,
+            %err,
+            "failed to encode session silence countdown telemetry"
+        ),
+    }
+}
+
+pub fn record_session_silence_autostop(session_id: &str, countdown_ms: u32, timestamp: SystemTime) {
+    let event = SessionSilenceAutoStopEvent {
+        session_id,
+        timestamp_ms: system_time_to_ms(timestamp),
+        reason: "silenceTimeout",
+        countdown_ms,
+    };
+
+    match serde_json::to_string(&event) {
+        Ok(payload) => info!(
+            target: SESSION_TARGET,
+            event = EVENT_SILENCE_AUTOSTOP,
+            session_id,
+            countdown_ms,
+            payload = %payload
+        ),
+        Err(err) => warn!(
+            target: SESSION_TARGET,
+            event = EVENT_SILENCE_AUTOSTOP,
+            %err,
+            "failed to encode session silence autostop telemetry"
+        ),
+    }
+}
+
 fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn system_time_to_ms(timestamp: SystemTime) -> u128 {
+    timestamp
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -420,5 +562,44 @@ mod tests {
     fn duration_clamps_to_u64() {
         let duration = Duration::new(u64::MAX, 0);
         assert_eq!(duration_to_ms(duration), u64::MAX);
+    }
+
+    #[test]
+    fn system_time_epoch_returns_zero() {
+        assert_eq!(system_time_to_ms(UNIX_EPOCH), 0);
+    }
+
+    #[test]
+    fn noise_warning_event_serializes() {
+        record_session_noise_warning(
+            "session-test",
+            -32.0,
+            -17.0,
+            -12.0,
+            320,
+            false,
+            SystemTime::UNIX_EPOCH + Duration::from_millis(42),
+        );
+    }
+
+    #[test]
+    fn silence_countdown_event_serializes() {
+        record_session_silence_countdown(
+            "session-test",
+            "started",
+            5_000,
+            5_000,
+            None,
+            SystemTime::UNIX_EPOCH + Duration::from_millis(84),
+        );
+    }
+
+    #[test]
+    fn silence_autostop_event_serializes() {
+        record_session_silence_autostop(
+            "session-test",
+            5_000,
+            SystemTime::UNIX_EPOCH + Duration::from_millis(126),
+        );
     }
 }
