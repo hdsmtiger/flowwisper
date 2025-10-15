@@ -21,8 +21,8 @@ use crate::session::history::{
 };
 use crate::session::lifecycle::{SessionLifecyclePhase, SessionLifecycleUpdate};
 use crate::session::publisher::{
-    FallbackStrategy, PublishOutcome, PublishRequest, PublishStrategy, Publisher,
-    PublisherFailure, PublisherFailureCode, PublisherStatus, SessionPublisher,
+    FallbackStrategy, PublishOutcome, PublishRequest, PublishStrategy, Publisher, PublisherFailure,
+    PublisherFailureCode, PublisherStatus, SessionPublisher,
 };
 use crate::telemetry::events::{
     record_session_draft_failed, record_session_draft_saved, record_session_noise_warning,

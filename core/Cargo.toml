@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-appender = "0.2"
 dirs = "5"
 whisper-rs = { version = "0.11", optional = true }
+ureq = { version = "2.9", features = ["tls", "gzip"] }
 
 [dependencies.r2d2]
 version = "0.8"
