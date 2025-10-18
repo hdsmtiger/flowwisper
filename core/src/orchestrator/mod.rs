@@ -1633,11 +1633,19 @@ impl SpeechEngine for FallbackSpeechEngine {
 #[cfg(feature = "local-asr")]
 mod whisper {
     use super::*;
-    use anyhow::anyhow;
+    use anyhow::{anyhow, Context, Result as AnyhowResult};
+    use dirs::data_dir;
+    use std::fs::{self, File};
+    use std::io::{BufWriter, Write};
     use std::mem::transmute;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
+    use tracing::{info, warn};
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperState};
+
+    const DEFAULT_MODEL_URL: &str =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+    const DEFAULT_MODEL_FILENAME: &str = "ggml-base.en.bin";
 
     pub struct WhisperLocalEngine {
         _context: Arc<WhisperContext>,
@@ -1646,8 +1654,8 @@ mod whisper {
 
     impl WhisperLocalEngine {
         pub fn from_env() -> Result<Self> {
-            let path = std::env::var("WHISPER_MODEL_PATH")?;
-            Self::from_model_path(path)
+            let model_path = resolve_or_fetch_model()?;
+            Self::from_model_path(model_path)
         }
 
         pub fn from_model_path<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -1663,6 +1671,231 @@ mod whisper {
                 _context: Arc::clone(&context),
                 streaming: Arc::new(Mutex::new(StreamingState::new(state))),
             })
+        }
+    }
+
+    fn resolve_or_fetch_model() -> AnyhowResult<PathBuf> {
+        if let Ok(path) = std::env::var("WHISPER_MODEL_PATH") {
+            let path_buf = PathBuf::from(path);
+            if path_buf.is_file() {
+                return Ok(path_buf);
+            }
+            return Err(anyhow!(
+                "WHISPER_MODEL_PATH points to a missing file: {}",
+                path_buf.display()
+            ));
+        }
+
+        if !auto_download_enabled() {
+            warn!(
+                target: "engine_orchestrator",
+                "WHISPER_MODEL_PATH missing and auto-download disabled"
+            );
+            return Err(anyhow!(
+                "WHISPER_MODEL_PATH is not set and auto-download is disabled"
+            ));
+        }
+
+        let cache_path = default_model_path()?;
+        if cache_path.is_file() {
+            std::env::set_var("WHISPER_MODEL_PATH", &cache_path);
+            return Ok(cache_path);
+        }
+
+        let url = std::env::var("WHISPER_MODEL_URL").unwrap_or_else(|_| DEFAULT_MODEL_URL.into());
+        download_model(&cache_path, &url)?;
+        std::env::set_var("WHISPER_MODEL_PATH", &cache_path);
+        Ok(cache_path)
+    }
+
+    fn default_model_path() -> AnyhowResult<PathBuf> {
+        if let Ok(dir) = std::env::var("FLOWWISPER_MODEL_DIR") {
+            let path = PathBuf::from(dir).join(DEFAULT_MODEL_FILENAME);
+            ensure_parent_dir(&path)?;
+            return Ok(path);
+        }
+
+        let base_dir = data_dir()
+            .map(|dir| dir.join("Flowwisper").join("models"))
+            .ok_or_else(|| anyhow!("failed to determine default model cache directory"))?;
+        let path = base_dir.join(DEFAULT_MODEL_FILENAME);
+        ensure_parent_dir(&path)?;
+        Ok(path)
+    }
+
+    fn ensure_parent_dir(path: &Path) -> AnyhowResult<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create whisper model directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn download_model(path: &Path, url: &str) -> AnyhowResult<()> {
+        info!(
+            target: "engine_orchestrator",
+            %url,
+            path = %path.display(),
+            "downloading whisper model"
+        );
+
+        let temp_path = path.with_extension("download");
+        let response = ureq::get(url)
+            .call()
+            .map_err(|err| anyhow!("failed to download whisper model: {err}"))?;
+
+        if !(200..300).contains(&response.status()) {
+            return Err(anyhow!(
+                "failed to download whisper model: received HTTP status {}",
+                response.status()
+            ));
+        }
+
+        let mut reader = response.into_reader();
+        let file = File::create(&temp_path).with_context(|| {
+            format!(
+                "failed to create temporary whisper model file: {}",
+                temp_path.display()
+            )
+        })?;
+        let mut writer = BufWriter::new(file);
+
+        std::io::copy(&mut reader, &mut writer)
+            .with_context(|| format!("failed to write whisper model to {}", temp_path.display()))?;
+        writer
+            .flush()
+            .context("failed to flush whisper model to disk")?;
+
+        fs::rename(&temp_path, path).with_context(|| {
+            format!(
+                "failed to finalize whisper model download to {}",
+                path.display()
+            )
+        })?;
+
+        info!(
+            target: "engine_orchestrator",
+            path = %path.display(),
+            "whisper model ready"
+        );
+
+        Ok(())
+    }
+
+    fn auto_download_enabled() -> bool {
+        if let Ok(value) = std::env::var("WHISPER_DISABLE_AUTO_DOWNLOAD") {
+            return !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+
+        if let Ok(value) = std::env::var("WHISPER_AUTO_DOWNLOAD") {
+            return matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+
+        true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Mutex, OnceLock};
+        use std::thread;
+        use tempfile::tempdir;
+
+        fn env_guard() -> &'static Mutex<()> {
+            static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+            GUARD.get_or_init(|| Mutex::new(()))
+        }
+
+        fn reset_env() {
+            std::env::remove_var("FLOWWISPER_MODEL_DIR");
+            std::env::remove_var("WHISPER_MODEL_PATH");
+            std::env::remove_var("WHISPER_MODEL_URL");
+            std::env::remove_var("WHISPER_AUTO_DOWNLOAD");
+            std::env::remove_var("WHISPER_DISABLE_AUTO_DOWNLOAD");
+        }
+
+        #[test]
+        fn downloads_model_when_missing() {
+            let _lock = env_guard().lock().expect("env guard poisoned");
+            reset_env();
+
+            let directory = tempdir().expect("tempdir should create model cache");
+            std::env::set_var("FLOWWISPER_MODEL_DIR", directory.path());
+
+            let payload = b"fake-whisper-model".to_vec();
+            let expected = payload.clone();
+
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+            let address = listener.local_addr().expect("local addr available");
+            let handle = thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buffer = [0_u8; 512];
+                    let _ = stream.read(&mut buffer);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("response headers written");
+                    stream.write_all(&payload).expect("response body written");
+                }
+            });
+
+            std::env::set_var(
+                "WHISPER_MODEL_URL",
+                format!("http://{address}/{}", DEFAULT_MODEL_FILENAME),
+            );
+
+            let model_path = resolve_or_fetch_model().expect("model should download");
+            handle.join().expect("http server thread joined");
+
+            assert_eq!(std::fs::read(&model_path).expect("read model"), expected);
+            assert_eq!(
+                std::env::var("WHISPER_MODEL_PATH").expect("model path exported"),
+                model_path.to_string_lossy()
+            );
+
+            reset_env();
+        }
+
+        #[test]
+        fn reuses_cached_model_when_present() {
+            let _lock = env_guard().lock().expect("env guard poisoned");
+            reset_env();
+
+            let directory = tempdir().expect("tempdir should create model cache");
+            let cached_path = directory.path().join(DEFAULT_MODEL_FILENAME);
+            std::fs::write(&cached_path, b"existing-model").expect("write cached whisper model");
+
+            std::env::set_var("FLOWWISPER_MODEL_DIR", directory.path());
+            std::env::set_var("WHISPER_MODEL_URL", "http://127.0.0.1:1/never-used");
+
+            let model_path = resolve_or_fetch_model().expect("should reuse cached model");
+
+            assert_eq!(model_path, cached_path);
+            assert_eq!(
+                std::fs::read(&model_path).expect("read cached model"),
+                b"existing-model"
+            );
+            assert_eq!(
+                std::env::var("WHISPER_MODEL_PATH").expect("model path exported"),
+                model_path.to_string_lossy()
+            );
+
+            reset_env();
         }
     }
 
@@ -1998,6 +2231,7 @@ mod tests {
         let _lock = env_guard().lock().expect("env guard poisoned");
         std::env::remove_var("WHISPER_MODEL_PATH");
         std::env::remove_var("WHISPER_ALLOW_FALLBACK");
+        std::env::set_var("WHISPER_DISABLE_AUTO_DOWNLOAD", "1");
 
         let result = EngineOrchestrator::new(EngineConfig {
             prefer_cloud: false,
@@ -2007,6 +2241,7 @@ mod tests {
             result.is_err(),
             "expected whisper init failure without fallback"
         );
+        std::env::remove_var("WHISPER_DISABLE_AUTO_DOWNLOAD");
     }
 
     #[test]
@@ -2014,6 +2249,7 @@ mod tests {
         let _lock = env_guard().lock().expect("env guard poisoned");
         std::env::remove_var("WHISPER_MODEL_PATH");
         std::env::set_var("WHISPER_ALLOW_FALLBACK", "1");
+        std::env::set_var("WHISPER_DISABLE_AUTO_DOWNLOAD", "1");
 
         let orchestrator = EngineOrchestrator::new(EngineConfig {
             prefer_cloud: false,
@@ -2021,6 +2257,7 @@ mod tests {
         .expect("fallback should be allowed when explicitly opted in");
 
         std::env::remove_var("WHISPER_ALLOW_FALLBACK");
+        std::env::remove_var("WHISPER_DISABLE_AUTO_DOWNLOAD");
         drop(orchestrator);
     }
 
