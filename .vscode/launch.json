@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "Launch Frontend",
+      "url": "http://localhost:1420",
+      "webRoot": "${workspaceFolder}/apps/desktop/src",
+      "preLaunchTask": "npm: dev",
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "runtimeExecutable": "${workspaceFolder}/apps/desktop/node_modules/.bin/vite",
+      "runtimeArgs": ["--port", "1420"]
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Tauri App",
+      "program": "${workspaceFolder}/apps/desktop/src-tauri/target/debug/libflowwisper_desktop.dylib",
+      "args": [],
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "env": {
+        "RUST_LOG": "debug"
+      },
+      "sourceLanguages": ["rust"]
+    }
+  ]
+}

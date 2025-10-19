@@ -20,9 +20,12 @@ pub enum ProbeError {
     Io(String),
 }
 
+
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{NativeProbeObservation, ProbeError};
+    use std::process::Command;
     use core_foundation::array::CFArray;
     use core_foundation::base::{kCFAllocatorDefault, CFRelease, CFTypeID, CFTypeRef, TCFType};
     use core_foundation::dictionary::{CFDictionary, CFMutableDictionary};
@@ -49,6 +52,59 @@ mod platform {
     use std::ffi::c_void;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    fn check_karabiner_installation() -> Result<String, String> {
+        // 检查Karabiner-Elements是否安装
+        let check_paths = vec![
+            "/Applications/Karabiner-Elements.app",
+            "/Library/Application Support/org.pqrs/Karabiner-Elements",
+        ];
+        
+        let mut found_paths = Vec::new();
+        for path in check_paths {
+            if std::path::Path::new(path).exists() {
+                found_paths.push(path);
+            }
+        }
+        
+        if found_paths.is_empty() {
+            return Err("Karabiner-Elements未安装。请访问 https://karabiner-elements.pqrs.org 下载安装。".to_string());
+        }
+        
+        // 检查驱动状态
+        match Command::new("launchctl").args(&["list"]).output() {
+            Ok(output) => {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                if output_str.contains("org.pqrs.karabiner") {
+                    found_paths.push("✓ Karabiner服务正在运行");
+                } else {
+                    found_paths.push("⚠ Karabiner服务未运行");
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("无法检查服务状态: {}", e);
+                found_paths.push(Box::leak(error_msg.into_boxed_str()));
+            }
+        }
+        
+        Ok(found_paths.join("\n"))
+    }
+
+    fn list_available_keyboards() -> Result<Vec<String>, String> {
+        // Karabiner驱动只提供了list_keyboards函数，没有返回设备列表的API
+        // 我们只能检查驱动是否响应
+        use karabiner_driverkit::{self as karabiner};
+        
+        // 尝试调用list_keyboards来检查驱动状态
+    karabiner::list_keyboards();
+        
+        // 由于无法获取具体设备列表，返回一个状态信息
+        if karabiner::driver_activated() {
+            Ok(vec!["Karabiner驱动已激活".to_string()])
+        } else {
+            Ok(vec!["Karabiner驱动未激活".to_string()])
+        }
+    }
 
     const APPLE_VENDOR_PAGE: u32 = 0xFF00;
     const APPLE_FN_USAGE: u32 = 0x0003;
@@ -297,7 +353,38 @@ mod platform {
         use std::sync::mpsc;
         use std::time::Instant;
 
+        // 更详细的Karabiner状态检查
         if !karabiner::driver_activated() {
+            // 尝试列出可用设备以提供更多信息
+            let device_info = match list_available_keyboards() {
+                Ok(devices) => {
+                    if devices.is_empty() {
+                        "未检测到任何键盘设备".to_string()
+                    } else {
+                        format!("驱动状态: {}", devices.join(", "))
+                    }
+                }
+                Err(e) => format!("无法枚举设备: {}", e)
+            };
+            
+            let installation_info = match check_karabiner_installation() {
+                Ok(info) => info,
+                Err(e) => e,
+            };
+            
+            let detailed_reason = format!(
+                "Karabiner-Elements 驱动未激活。\n\
+                 安装状态：\n{}\n\n\
+                 解决方案：\n\
+                 1. 确保已安装 Karabiner-Elements (https://karabiner-elements.pqrs.org)\n\
+                 2. 在系统设置中启用 Karabiner-Elements\n\
+                 3. 重启应用后重试\n\
+                 4. 或者使用自定义热键作为备选方案\n\n\
+                 设备状态: {}",
+                installation_info,
+                device_info
+            );
+            
             return Ok(NativeProbeObservation {
                 supported: false,
                 latency: None,
@@ -306,7 +393,7 @@ mod platform {
                 within_sla: None,
                 device_origin: None,
                 interface: "Karabiner",
-                reason: Some("Karabiner 虚拟设备未激活".into()),
+                reason: Some(detailed_reason),
             });
         }
 

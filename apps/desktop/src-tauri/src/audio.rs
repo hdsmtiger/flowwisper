@@ -959,25 +959,52 @@ fn request_microphone_permission_macos() -> Result<PermissionCheck, String> {
     // 在主线程上执行 UI 相关的操作以避免崩溃
     block_on(async move {
         unsafe {
-            let session: *mut Object = msg_send![class!(AVAudioSession), sharedInstance];
+            // 尝试获取 AVAudioSession
+            let session_cls = class!(AVAudioSession);
+            let session: *mut Object = msg_send![session_cls, sharedInstance];
             if session.is_null() {
-                return Err("无法获取 AVAudioSession".into());
+                return Err("无法获取 AVAudioSession 实例".into());
+            }
+            
+            // 检查 session 是否响应 requestRecordPermission: 方法
+            let sel = sel!(requestRecordPermission:);
+            let responds: bool = msg_send![session, respondsToSelector: sel];
+            if !responds {
+                return Err("AVAudioSession 不响应 requestRecordPermission: 方法".into());
+            }
+            
+            // 检查应用是否已激活
+            let app_cls = class!(NSApplication);
+            let app: *mut Object = msg_send![app_cls, sharedApplication];
+            if !app.is_null() {
+                let activation_policy: i32 = msg_send![app, activationPolicy];
+                if activation_policy != 0 { // NSApplicationActivationPolicyRegular
+                    let _: () = msg_send![app, setActivationPolicy: 0]; // NSApplicationActivationPolicyRegular
+                }
+                
+                // 激活应用
+                let _: () = msg_send![app, activateIgnoringOtherApps: true];
             }
             
             let (sender, receiver) = mpsc::channel();
+            
+            // 创建 block，使用 Arc 来确保生命周期
+            let sender = std::sync::Arc::new(std::sync::Mutex::new(Some(sender)));
+            let sender_clone = sender.clone();
+            
             let block = ConcreteBlock::new(move |granted: bool| {
-                let _ = sender.send(granted);
+                if let Ok(mut sender) = sender_clone.lock() {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(granted);
+                    }
+                }
             });
+            
+            // 复制 block 以确保它有正确的引用计数
             let block = block.copy();
             
-            // 添加异常处理以防止崩溃
-            let result: Result<(), String> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _: () = msg_send![session, requestRecordPermission:&block];
-            })).map_err(|_| "调用系统权限API时发生异常".to_string());
-            
-            if let Err(err) = result {
-                return Err(err);
-            }
+            // 现在可以安全地调用方法
+            let _: () = msg_send![session, requestRecordPermission: &*block];
 
             match receiver.recv_timeout(StdDuration::from_secs(5)) {
                 Ok(true) => Ok(PermissionCheck {
@@ -1193,8 +1220,16 @@ fn capture_audio(
     stream
         .play()
         .map_err(|err| format!("启动录音失败: {err}"))?;
+    
+    // 等待录音完成，但添加超时保护
     std::thread::sleep(duration + Duration::from_millis(120));
+    
+    // 先暂停流，然后完全停止并清理
+    let _ = stream.pause();
     drop(stream);
+    
+    // 给系统一点时间来清理音频线程
+    std::thread::sleep(Duration::from_millis(10));
 
     let flushed = dsp
         .lock()
@@ -1218,14 +1253,20 @@ fn capture_audio(
         if let Ok(mut emitter) = meter.lock() {
             emitter.flush();
         }
+        // 给计量器一点时间来完成最后的处理
+        std::thread::sleep(Duration::from_millis(5));
     }
 
     drop(target);
 
-    let samples = Arc::try_unwrap(collected)
-        .map_err(|_| "无法获取录音数据所有权".to_string())?
-        .into_inner()
-        .map_err(|err| format!("无法锁定录音缓冲区: {err}"))?;
+    // 尝试获取数据，但如果Arc还有引用，则使用克隆方式
+    let samples = match Arc::try_unwrap(collected) {
+        Ok(arc) => arc.into_inner().map_err(|err| format!("无法锁定录音缓冲区: {err}"))?,
+        Err(arc) => {
+            // 如果无法unwrap，从Arc中克隆数据
+            arc.lock().map_err(|err| format!("无法锁定录音缓冲区: {err}"))?.clone()
+        }
+    };
 
     if samples.is_empty() {
         Err("录音缓冲为空，请确认麦克风是否可用".into())

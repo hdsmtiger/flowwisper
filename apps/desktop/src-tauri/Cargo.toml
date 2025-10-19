@@ -35,7 +35,7 @@ io-kit-sys = "0.3"
 mach = "0.3"
 karabiner-driverkit = "0.2"
 security-framework = "2"
-objc = "0.2"
+objc = "0.2.7"
 block = "0.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]

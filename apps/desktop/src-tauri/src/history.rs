@@ -24,9 +24,8 @@ fn resolve_config() -> Result<SqliteConfig, String> {
         .or_else(|_| {
             data_dir()
                 .map(|dir| dir.join("Flowwisper"))
-                .ok_or_else(|| "无法定位数据目录".to_string())
-        })
-        .map_err(|_| "无法定位历史数据库目录".to_string())?;
+                .ok_or_else(|| "无法定位历史数据库目录".to_string())
+        })?;
 
     fs::create_dir_all(&base_dir).map_err(|err| format!("无法创建数据目录 {base_dir:?}: {err}"))?;
 

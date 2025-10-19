@@ -1,0 +1,27 @@
+{
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "apps/desktop",
+      "name": "desktop"
+    },
+    {
+      "path": "core",
+      "name": "core"
+    },
+    {
+      "path": "services/api_gateway",
+      "name": "api_gateway"
+    },
+    {
+      "path": "services/hybrid_router",
+      "name": "hybrid_router"
+    },
+    {
+      "path": "services/admin_console",
+      "name": "admin_console"
+    }
+  ]
+}

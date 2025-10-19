@@ -1,0 +1,25 @@
+{
+  "timestamp": "2025-10-12T10:50:13.717Z",
+  "error": {
+    "name": "Error",
+    "message": "write EIO",
+    "stack": "Error: write EIO\n    at WriteWrap.onWriteComplete [as oncomplete] (node:internal/stream_base_commons:87:19)"
+  },
+  "memory": {
+    "rss": 105017344,
+    "heapTotal": 82464768,
+    "heapUsed": 66847544,
+    "external": 20836296,
+    "arrayBuffers": 208764
+  },
+  "pid": 55770,
+  "cwd": "/Users/linshirong/workspace/flowwisper",
+  "nodeVersion": "v24.1.0",
+  "platform": "darwin",
+  "arch": "x64",
+  "uptime": 106916.317822792,
+  "env": {
+    "NODE_ENV": "production",
+    "CLI_VERSION": "0.3.1-beta.1"
+  }
+}
