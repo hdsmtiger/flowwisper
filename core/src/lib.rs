@@ -4,6 +4,8 @@
 //! including audio processing, session management, persistence, and telemetry.
 
 pub mod audio;
+pub mod basic_test;
+pub mod dirs_compat;
 pub mod orchestrator;
 pub mod persistence;
 pub mod session;

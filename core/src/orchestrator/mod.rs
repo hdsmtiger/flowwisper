@@ -1634,7 +1634,7 @@ impl SpeechEngine for FallbackSpeechEngine {
 mod whisper {
     use super::*;
     use anyhow::{anyhow, Context, Result as AnyhowResult};
-    use dirs::data_dir;
+    use crate::dirs_compat::data_dir;
     use std::fs::{self, File};
     use std::io::{BufWriter, Write};
     use std::mem::transmute;

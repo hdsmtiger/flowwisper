@@ -32,7 +32,7 @@ use crate::telemetry::events::{
     EVENT_SILENCE_AUTOSTOP, EVENT_SILENCE_COUNTDOWN,
 };
 use anyhow::{anyhow, Context, Result};
-use dirs::data_dir;
+use crate::dirs_compat::data_dir;
 use serde_json::json;
 use std::env;
 use std::fs;
